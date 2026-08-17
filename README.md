@@ -45,6 +45,17 @@ npm run export:web
 
 The generated site is written to `dist/`. Native-only capabilities are presented as previews on the web; location, motion, contacts, and other device permissions must be tested on Android or iOS.
 
+## Expo preview
+
+The app is linked to the [`@ycodex/commute-ping`](https://expo.dev/accounts/ycodex/projects/commute-ping) EAS project. Preview builds use the `preview` update channel; Android preview builds are installable APKs.
+
+```bash
+npx eas-cli@latest update --channel preview --environment preview --message "Describe the update"
+npx eas-cli@latest build --profile preview --platform android
+```
+
+EAS Update requires a compatible preview or production build on the phone. It is not a replacement for the local Expo Go development server.
+
 ## Quality checks
 
 ```bash

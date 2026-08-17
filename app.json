@@ -71,6 +71,19 @@
       "typedRoutes": true,
       "reactCompiler": true,
       "baseUrl": "/CommutePing"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "2f289b8c-8a8b-4961-ab3f-cee2badd1ad0"
+      }
+    },
+    "owner": "ycodex",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/2f289b8c-8a8b-4961-ab3f-cee2badd1ad0"
     }
   }
 }
