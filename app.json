@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "Commute Ping",
+    "slug": "commute-ping",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "commuteping",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "in.commuteping.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Commute Ping uses foreground location during an active commute to show progress on this device. This build does not send location to contacts.",
+        "NSMotionUsageDescription": "Commute Ping reads motion sensors during an active commute to preview future fall and phone-snatch detection. This build does not trigger alerts."
+      }
+    },
+    "android": {
+      "package": "in.commuteping.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Commute Ping uses foreground location during an active commute to show progress on this device. This build does not send location to contacts."
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Commute Ping reads motion sensors during an active commute to preview future fall and phone-snatch detection. This build does not trigger alerts."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#208AEF",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      "expo-image"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
