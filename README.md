@@ -7,6 +7,7 @@ Android and iOS implementation of Commute Ping, built with Expo and React Native
 - Figma-inspired dark mobile interface with Track, Routes, Alerts, and Safety screens
 - Explicit one-tap commute start and safe-arrival closure
 - Searchable Android/iOS route planner with map-tap selection, current-location selection, and locally saved start/destination coordinates
+- Contextual contact permission and native phone-contact picker that prefills the local trusted-contact form
 - Foreground location permission and live location updates during an active commute
 - Battery-aware tracking profiles: Precise, Balanced, and Saver
 - Accelerometer and gyroscope readings during active commutes

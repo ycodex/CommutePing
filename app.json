@@ -18,6 +18,9 @@
     },
     "android": {
       "package": "in.commuteping.app",
+      "blockedPermissions": [
+        "android.permission.WRITE_CONTACTS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -40,6 +43,12 @@
         "expo-location",
         {
           "locationWhenInUsePermission": "Commute Ping uses foreground location during an active commute to show progress on this device. This build does not send location to contacts."
+        }
+      ],
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow Commute Ping to access your contacts so you can choose a trusted contact. Selected details stay on this device and no invitation is sent."
         }
       ],
       [

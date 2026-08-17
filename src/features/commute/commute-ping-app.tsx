@@ -31,6 +31,8 @@ import type { LocationRuntimeStatus } from '@/hooks/use-commute-location';
 import { useCommutePreferences } from '@/hooks/use-commute-preferences';
 import { useCommuteLocation } from '@/hooks/use-commute-location';
 import { useBatteryState, useMotionReadings } from '@/hooks/use-device-safety';
+import { contactSetupForResult, type ContactPrefill } from '@/features/contacts/contact-import';
+import { pickDeviceContact } from '@/features/contacts/device-contact-picker';
 import { RoutePickerModal } from '@/features/routes/route-picker-modal';
 
 const icons = {
@@ -294,6 +296,7 @@ function SafetyScreen({
   contacts,
   motionAvailable,
   commuteActive,
+  contactPickerBusy,
   onToggle,
   onAddContact,
   onClearLocalData,
@@ -302,6 +305,7 @@ function SafetyScreen({
   contacts: TrustedContact[];
   motionAvailable: boolean;
   commuteActive: boolean;
+  contactPickerBusy: boolean;
   onToggle: (key: SensorKey) => void;
   onAddContact: () => void;
   onClearLocalData: () => void;
@@ -326,9 +330,16 @@ function SafetyScreen({
         <View style={styles.flexOne}><Text style={styles.cardTitle}>Trip Data</Text><Text style={styles.cardCopy}>No location history or call metadata is stored in this local build.</Text></View>
         <AppIcon name={icons.lock} size={16} color={palette.mutedDark} />
       </Card>
-      <Pressable accessibilityRole="button" accessibilityLabel="Add trusted contact" onPress={onAddContact} style={styles.contactsCard}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Add trusted contact"
+        accessibilityState={{ busy: contactPickerBusy, disabled: contactPickerBusy }}
+        disabled={contactPickerBusy}
+        onPress={onAddContact}
+        style={[styles.contactsCard, contactPickerBusy && styles.contactsCardBusy]}
+      >
         <View style={styles.avatarStack}>{contacts.slice(0, 3).map((contact, index) => <View key={contact.id} style={[styles.avatar, { marginLeft: index === 0 ? 0 : -8 }]}><Text style={styles.avatarText}>{contact.name.slice(0, 1)}</Text></View>)}</View>
-        <View style={styles.flexOne}><Text style={styles.cardTitle}>Trusted Contacts</Text><Text style={styles.cardCopy}>{contacts.length === 0 ? 'None saved yet' : `${contacts.length} saved locally · no invite sent`}</Text></View>
+        <View style={styles.flexOne}><Text style={styles.cardTitle}>Trusted Contacts</Text><Text style={styles.cardCopy}>{contactPickerBusy ? 'Opening phone contacts…' : contacts.length === 0 ? 'None saved yet' : `${contacts.length} saved locally · no invite sent`}</Text></View>
         <AppIcon name={icons.add} size={17} color={palette.muted} />
       </Pressable>
       <Pressable accessibilityRole="button" onPress={onClearLocalData} style={styles.clearDataButton}>
@@ -383,10 +394,22 @@ function SosModal({ visible, onCancel }: { visible: boolean; onCancel: () => voi
   );
 }
 
-function AddContactModal({ visible, onClose, onSubmit }: { visible: boolean; onClose: () => void; onSubmit: (contact: TrustedContact) => void }) {
-  const [name, setName] = useState('');
+function AddContactModal({
+  visible,
+  initialContact,
+  accessMessage,
+  onClose,
+  onSubmit,
+}: {
+  visible: boolean;
+  initialContact: ContactPrefill;
+  accessMessage: string;
+  onClose: () => void;
+  onSubmit: (contact: TrustedContact) => void;
+}) {
+  const [name, setName] = useState(initialContact?.name ?? '');
   const [relation, setRelation] = useState('');
-  const [phone, setPhone] = useState('');
+  const [phone, setPhone] = useState(initialContact?.phone ?? '');
 
   const submit = () => {
     const cleanName = name.trim();
@@ -408,6 +431,10 @@ function AddContactModal({ visible, onClose, onSubmit }: { visible: boolean; onC
           <View style={styles.contactModalIcon}><AppIcon name={icons.people} size={23} color="#78A0FF" /></View>
           <Text style={styles.contactModalTitle}>Add trusted contact</Text>
           <Text style={styles.contactModalCopy}>Saved only on this device. No invitation or commute information is sent yet.</Text>
+          <View accessibilityLiveRegion="polite" style={styles.contactAccessNotice}>
+            <AppIcon name={initialContact ? icons.check : icons.lock} size={15} color={initialContact ? palette.green : palette.amber} />
+            <Text style={styles.contactAccessText}>{accessMessage}</Text>
+          </View>
           <TextInput accessibilityLabel="Contact name" value={name} onChangeText={setName} placeholder="Name" placeholderTextColor={palette.mutedDark} style={styles.input} autoCapitalize="words" maxLength={80} />
           <TextInput accessibilityLabel="Relationship" value={relation} onChangeText={setRelation} placeholder="Relationship" placeholderTextColor={palette.mutedDark} style={styles.input} autoCapitalize="words" maxLength={80} />
           <TextInput accessibilityLabel="Mobile number" value={phone} onChangeText={setPhone} placeholder="+91 98765 43210" placeholderTextColor={palette.mutedDark} style={styles.input} keyboardType="phone-pad" maxLength={30} />
@@ -440,6 +467,10 @@ export function CommutePingApp() {
   const [state, dispatch] = useReducer(commuteReducer, initialCommuteState);
   const [toast, setToast] = useState<ToastState>(null);
   const [contactModal, setContactModal] = useState(false);
+  const [contactModalKey, setContactModalKey] = useState(0);
+  const [contactPrefill, setContactPrefill] = useState<ContactPrefill>(null);
+  const [contactAccessMessage, setContactAccessMessage] = useState('Enter contact details manually.');
+  const [contactPickerBusy, setContactPickerBusy] = useState(false);
   const [routeModal, setRouteModal] = useState(false);
   const [clearDataModal, setClearDataModal] = useState(false);
   const battery = useBatteryState();
@@ -492,6 +523,21 @@ export function CommutePingApp() {
     notify('Local safe arrival recorded · foreground location stopped');
   };
 
+  const addTrustedContact = async () => {
+    if (contactPickerBusy) return;
+    setContactPickerBusy(true);
+    try {
+      const result = await pickDeviceContact();
+      const contactSetup = contactSetupForResult(result);
+      setContactPrefill(contactSetup.prefill);
+      setContactAccessMessage(contactSetup.message);
+      setContactModalKey((current) => current + 1);
+      setContactModal(true);
+    } finally {
+      setContactPickerBusy(false);
+    }
+  };
+
   let screen: ReactNode;
   if (state.screen === 'track') {
     screen = <TrackScreen phase={state.phase} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} accuracy={commuteLocation.location?.accuracy ?? null} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onStart={startCommute} onEnd={endCommute} onCheckIn={() => { dispatch({ type: 'CHECK_IN', timestamp: Date.now() }); notify('Local check-in recorded · nothing was sent'); }} />;
@@ -500,7 +546,7 @@ export function CommutePingApp() {
   } else if (state.screen === 'alerts') {
     screen = <AlertsScreen rules={state.rules} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} />;
   } else {
-    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={() => setContactModal(true)} onClearLocalData={() => setClearDataModal(true)} />;
+    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onClearLocalData={() => setClearDataModal(true)} />;
   }
 
   return (
@@ -511,7 +557,7 @@ export function CommutePingApp() {
         <BottomNavigation screen={state.screen} onNavigate={(next) => dispatch({ type: 'NAVIGATE', screen: next })} onSos={() => dispatch({ type: 'OPEN_SOS' })} />
       </View>
       <SosModal visible={state.sosActive} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS demo closed · no data was sent'); }} />
-      <AddContactModal visible={contactModal} onClose={() => setContactModal(false)} onSubmit={(contact) => { dispatch({ type: 'ADD_CONTACT', contact }); setContactModal(false); notify(`${contact.name} saved locally · no invite sent`); }} />
+      <AddContactModal key={contactModalKey} visible={contactModal} initialContact={contactPrefill} accessMessage={contactAccessMessage} onClose={() => setContactModal(false)} onSubmit={(contact) => { dispatch({ type: 'ADD_CONTACT', contact }); setContactModal(false); notify(`${contact.name} saved locally · no invite sent`); }} />
       <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setRouteModal(false); notify(`${route.title} saved locally`); }} />
       <ClearDataModal visible={clearDataModal} onCancel={() => setClearDataModal(false)} onConfirm={() => { dispatch({ type: 'RESET_PREFERENCES' }); setClearDataModal(false); notify('Local contacts, routes, and preferences cleared'); }} />
       {persistedPreferences.storageError && <View accessibilityLiveRegion="polite" style={styles.storageWarning}><Text style={styles.storageWarningText}>Local changes could not be saved. Keep the app open and try again.</Text></View>}
@@ -598,6 +644,7 @@ const styles = StyleSheet.create({
   dataCard: { marginTop: 17, padding: 15, flexDirection: 'row', alignItems: 'center', gap: 11 },
   dataIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#29292D', alignItems: 'center', justifyContent: 'center' },
   contactsCard: { marginTop: 14, minHeight: 68, borderRadius: radius.medium, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.lineStrong, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 11 },
+  contactsCardBusy: { opacity: 0.58 },
   clearDataButton: { minHeight: 45, borderRadius: radius.medium, borderColor: 'rgba(239,57,75,0.35)', borderWidth: 1, alignItems: 'center', justifyContent: 'center', marginTop: 14 },
   clearDataText: { color: '#FF7A84', fontSize: 11, fontWeight: '600' },
   avatarStack: { flexDirection: 'row' },
@@ -632,6 +679,8 @@ const styles = StyleSheet.create({
   contactModalIcon: { width: 47, height: 47, borderRadius: 14, backgroundColor: palette.blueSoft, alignItems: 'center', justifyContent: 'center' },
   contactModalTitle: { color: palette.text, fontSize: 21, fontWeight: '700', marginTop: 18 },
   contactModalCopy: { color: palette.muted, fontSize: 11, lineHeight: 16, marginTop: 7, marginBottom: 8, maxWidth: 330 },
+  contactAccessNotice: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 10, backgroundColor: '#242429', borderColor: palette.line, borderWidth: 1, paddingHorizontal: 11, marginTop: 6 },
+  contactAccessText: { flex: 1, color: '#C6C6CE', fontSize: 10, lineHeight: 14 },
   input: { minHeight: 47, borderRadius: 11, borderColor: palette.line, borderWidth: 1, backgroundColor: '#111114', color: palette.text, fontSize: 13, paddingHorizontal: 13, marginTop: 11 },
   inviteButton: { minHeight: 47, borderRadius: 11, backgroundColor: palette.blue, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 17 },
   inviteText: { color: palette.white, fontSize: 13, fontWeight: '600' },
