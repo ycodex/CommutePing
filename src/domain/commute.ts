@@ -12,12 +12,20 @@ export type TrustedContact = {
   status: 'local';
 };
 
+export type RoutePoint = {
+  label: string;
+  latitude: number;
+  longitude: number;
+};
+
 export type SavedRoute = {
   id: string;
   title: string;
   schedule: string;
   durationMinutes: number;
   learned: boolean;
+  origin?: RoutePoint;
+  destination?: RoutePoint;
 };
 
 export type CommuteState = {

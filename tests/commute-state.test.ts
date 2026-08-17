@@ -56,10 +56,19 @@ test('ignores check-ins when a commute is not active', () => {
 });
 
 test('saves a user-entered route once', () => {
-  const route = { id: 'route-1', title: 'Office to Home', schedule: 'Weekdays · 8:30 PM', durationMinutes: 42, learned: false };
+  const route = {
+    id: 'route-1',
+    title: 'Office to Home',
+    schedule: 'Weekdays · 8:30 PM',
+    durationMinutes: 42,
+    learned: false,
+    origin: { label: 'MG Road, Bengaluru', latitude: 12.9756, longitude: 77.6063 },
+    destination: { label: 'Indiranagar, Bengaluru', latitude: 12.9784, longitude: 77.6408 },
+  };
   const saved = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
   const savedAgain = commuteReducer(saved, { type: 'ADD_ROUTE', route: { ...route, id: 'route-2' } });
   assert.equal(saved.routes[0]?.title, 'Office to Home');
+  assert.equal(saved.routes[0]?.destination?.label, 'Indiranagar, Bengaluru');
   assert.equal(savedAgain.routes.length, saved.routes.length);
 });
 

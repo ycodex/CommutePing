@@ -1,6 +1,7 @@
 import type {
   AlertRuleKey,
   CommutePreferences,
+  RoutePoint,
   SavedRoute,
   SensorKey,
   TrustedContact,
@@ -59,7 +60,22 @@ function isSavedRoute(value: unknown): value is SavedRoute {
     && Number.isInteger(value.durationMinutes)
     && value.durationMinutes >= 1
     && value.durationMinutes <= 360
-    && typeof value.learned === 'boolean';
+    && typeof value.learned === 'boolean'
+    && (value.origin === undefined || isRoutePoint(value.origin))
+    && (value.destination === undefined || isRoutePoint(value.destination));
+}
+
+function isRoutePoint(value: unknown): value is RoutePoint {
+  if (!isRecord(value)) return false;
+  return isBoundedText(value.label, 180)
+    && typeof value.latitude === 'number'
+    && Number.isFinite(value.latitude)
+    && value.latitude >= -90
+    && value.latitude <= 90
+    && typeof value.longitude === 'number'
+    && Number.isFinite(value.longitude)
+    && value.longitude >= -180
+    && value.longitude <= 180;
 }
 
 function isBooleanRecord<K extends string>(value: unknown, keys: K[]): value is Record<K, boolean> {

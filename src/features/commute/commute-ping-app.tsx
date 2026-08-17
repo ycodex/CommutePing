@@ -31,6 +31,7 @@ import type { LocationRuntimeStatus } from '@/hooks/use-commute-location';
 import { useCommutePreferences } from '@/hooks/use-commute-preferences';
 import { useCommuteLocation } from '@/hooks/use-commute-location';
 import { useBatteryState, useMotionReadings } from '@/hooks/use-device-safety';
+import { RoutePickerModal } from '@/features/routes/route-picker-modal';
 
 const icons = {
   track: { ios: 'location.fill', android: 'location_on', web: 'location_on' },
@@ -229,13 +230,19 @@ function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => vo
         {routes.length === 0 && (
           <Card style={styles.emptyCard}>
             <Text style={styles.cardTitle}>No routes saved</Text>
-            <Text style={styles.cardCopy}>Add a route name and expected schedule. Automatic route learning is not connected yet.</Text>
+            <Text style={styles.cardCopy}>Search or tap the map to choose a start and destination, then add the expected schedule.</Text>
           </Card>
         )}
         {routes.map((route) => (
           <View key={route.id} style={styles.routeCard}>
             <View style={styles.routeIcon}><AppIcon name={route.learned ? icons.routes : icons.track} size={20} color={route.learned ? '#78A0FF' : palette.green} /></View>
-            <View style={styles.flexOne}><Text style={styles.cardTitle}>{route.title}</Text><Text style={styles.cardCopy}>{route.schedule} · {route.durationMinutes} min</Text></View>
+            <View style={styles.flexOne}>
+              <Text style={styles.cardTitle}>{route.title}</Text>
+              {route.origin && route.destination && (
+                <Text numberOfLines={1} style={styles.routePlaces}>{route.origin.label} → {route.destination.label}</Text>
+              )}
+              <Text style={styles.cardCopy}>{route.schedule} · {route.durationMinutes} min</Text>
+            </View>
             <AppIcon name={route.learned ? icons.chevron : icons.check} size={17} color={route.learned ? palette.mutedDark : palette.green} />
           </View>
         ))}
@@ -411,41 +418,6 @@ function AddContactModal({ visible, onClose, onSubmit }: { visible: boolean; onC
   );
 }
 
-function AddRouteModal({ visible, onClose, onSubmit }: { visible: boolean; onClose: () => void; onSubmit: (route: SavedRoute) => void }) {
-  const [title, setTitle] = useState('');
-  const [schedule, setSchedule] = useState('');
-  const [duration, setDuration] = useState('');
-
-  const submit = () => {
-    const cleanTitle = title.trim();
-    const cleanSchedule = schedule.trim();
-    const durationMinutes = Number(duration);
-    if (!cleanTitle || !cleanSchedule || !Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 360) {
-      Alert.alert('Check route details', 'Enter a route name, schedule, and duration from 1 to 360 minutes.');
-      return;
-    }
-    onSubmit({ id: `${Date.now()}`, title: cleanTitle, schedule: cleanSchedule, durationMinutes, learned: false });
-    setTitle(''); setSchedule(''); setDuration('');
-  };
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
-        <View style={styles.contactModal}>
-          <Pressable accessibilityLabel="Close add route" accessibilityRole="button" onPress={onClose} style={styles.closeButton}><AppIcon name={icons.close} size={17} color={palette.text} /></Pressable>
-          <View style={styles.contactModalIcon}><AppIcon name={icons.routes} size={23} color="#78A0FF" /></View>
-          <Text style={styles.contactModalTitle}>Add planned route</Text>
-          <Text style={styles.contactModalCopy}>Saved locally for planning. Automatic route learning and alerts are not connected.</Text>
-          <TextInput accessibilityLabel="Route name" value={title} onChangeText={setTitle} placeholder="Work to Home" placeholderTextColor={palette.mutedDark} style={styles.input} autoCapitalize="words" maxLength={100} />
-          <TextInput accessibilityLabel="Expected schedule" value={schedule} onChangeText={setSchedule} placeholder="Weekdays · 8:30 PM" placeholderTextColor={palette.mutedDark} style={styles.input} maxLength={100} />
-          <TextInput accessibilityLabel="Expected duration in minutes" value={duration} onChangeText={setDuration} placeholder="45 minutes" placeholderTextColor={palette.mutedDark} style={styles.input} keyboardType="number-pad" maxLength={3} />
-          <Pressable accessibilityRole="button" onPress={submit} style={styles.inviteButton}><AppIcon name={icons.add} size={16} color={palette.white} /><Text style={styles.inviteText}>Save Route Locally</Text></Pressable>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
 function ClearDataModal({ visible, onCancel, onConfirm }: { visible: boolean; onCancel: () => void; onConfirm: () => void }) {
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onCancel}>
@@ -540,7 +512,7 @@ export function CommutePingApp() {
       </View>
       <SosModal visible={state.sosActive} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS demo closed · no data was sent'); }} />
       <AddContactModal visible={contactModal} onClose={() => setContactModal(false)} onSubmit={(contact) => { dispatch({ type: 'ADD_CONTACT', contact }); setContactModal(false); notify(`${contact.name} saved locally · no invite sent`); }} />
-      <AddRouteModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setRouteModal(false); notify(`${route.title} saved locally`); }} />
+      <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setRouteModal(false); notify(`${route.title} saved locally`); }} />
       <ClearDataModal visible={clearDataModal} onCancel={() => setClearDataModal(false)} onConfirm={() => { dispatch({ type: 'RESET_PREFERENCES' }); setClearDataModal(false); notify('Local contacts, routes, and preferences cleared'); }} />
       {persistedPreferences.storageError && <View accessibilityLiveRegion="polite" style={styles.storageWarning}><Text style={styles.storageWarningText}>Local changes could not be saved. Keep the app open and try again.</Text></View>}
       {toast && <View key={toast.id} accessibilityLiveRegion="polite" style={styles.toast}><AppIcon name={icons.check} size={15} color={palette.green} /><Text style={styles.toastText}>{toast.message}</Text></View>}
@@ -603,6 +575,7 @@ const styles = StyleSheet.create({
   privacyCaption: { color: palette.mutedDark, fontSize: 10, textAlign: 'center', marginTop: 18 },
   routeCard: { minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: palette.card, borderColor: palette.line, borderRadius: radius.medium, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 15, paddingVertical: 13 },
   routeIcon: { width: 39, height: 39, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blueSoft },
+  routePlaces: { color: '#AFC5FF', fontSize: 10, lineHeight: 14, marginTop: 5 },
   saveRouteButton: { marginTop: 18, minHeight: 55, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.lineStrong, borderRadius: radius.medium, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   saveRouteButtonDone: { borderColor: 'rgba(69,201,148,0.35)', backgroundColor: palette.greenSoft },
   saveRouteText: { color: palette.muted, fontSize: 12, fontWeight: '500' },
