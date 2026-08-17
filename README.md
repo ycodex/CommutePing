@@ -35,6 +35,16 @@ The first commute start asks for foreground location permission. Location is dis
 
 The route planner works in Expo Go on Android and iOS. A standalone Android release requires a restricted Google Maps SDK key before store distribution; do not commit that key to the repository.
 
+## Web preview
+
+The static Expo web build is configured for the GitHub Pages repository path at `https://ycodex.github.io/CommutePing/`.
+
+```bash
+npm run export:web
+```
+
+The generated site is written to `dist/`. Native-only capabilities are presented as previews on the web; location, motion, contacts, and other device permissions must be tested on Android or iOS.
+
 ## Quality checks
 
 ```bash
