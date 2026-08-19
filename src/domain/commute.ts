@@ -3,6 +3,18 @@ export type CommutePhase = 'idle' | 'starting' | 'active';
 export type LocationStatus = 'off' | 'requesting' | 'live' | 'denied' | 'unavailable';
 export type AlertRuleKey = 'connectivity' | 'battery' | 'idle' | 'calls';
 export type SensorKey = 'snatch' | 'fall';
+export type IncidentKind = 'check-in' | 'late' | 'idle' | 'battery' | 'fall' | 'snatch' | 'deviation' | 'sos';
+export type IncidentStatus = 'open' | 'dismissed' | 'recorded';
+
+export type IncidentRecord = {
+  id: string;
+  kind: IncidentKind;
+  title: string;
+  detail: string;
+  createdAt: number;
+  status: IncidentStatus;
+  routeId?: string;
+};
 
 export type TrustedContact = {
   id: string;
@@ -18,6 +30,14 @@ export type RoutePoint = {
   longitude: number;
 };
 
+export type RouteCoordinate = Pick<RoutePoint, 'latitude' | 'longitude'>;
+
+export type RouteGeometry = {
+  source: 'preview' | 'road';
+  coordinates: RouteCoordinate[];
+  distanceMeters?: number;
+};
+
 export type SavedRoute = {
   id: string;
   title: string;
@@ -26,11 +46,14 @@ export type SavedRoute = {
   learned: boolean;
   origin?: RoutePoint;
   destination?: RoutePoint;
+  geometry?: RouteGeometry;
 };
 
 export type CommuteState = {
   screen: AppScreen;
   phase: CommutePhase;
+  activeRouteId: string | null;
+  startedAt: number | null;
   locationStatus: LocationStatus;
   batteryPercent: number;
   lowPowerMode: boolean;
@@ -40,14 +63,15 @@ export type CommuteState = {
   sensors: Record<SensorKey, boolean>;
   contacts: TrustedContact[];
   routes: SavedRoute[];
+  incidents: IncidentRecord[];
 };
 
-export type CommutePreferences = Pick<CommuteState, 'rules' | 'sensors' | 'contacts' | 'routes'>;
+export type CommutePreferences = Pick<CommuteState, 'rules' | 'sensors' | 'contacts' | 'routes' | 'incidents'>;
 
 export type CommuteAction =
   | { type: 'NAVIGATE'; screen: AppScreen }
-  | { type: 'START_REQUESTED' }
-  | { type: 'START_SUCCEEDED' }
+  | { type: 'START_REQUESTED'; routeId?: string | null }
+  | { type: 'START_SUCCEEDED'; timestamp?: number }
   | { type: 'START_FAILED'; status: Extract<LocationStatus, 'denied' | 'unavailable'> }
   | { type: 'LOCATION_LOST' }
   | { type: 'END_COMMUTE'; timestamp: number }
@@ -57,6 +81,8 @@ export type CommuteAction =
   | { type: 'TOGGLE_SENSOR'; key: SensorKey }
   | { type: 'ADD_ROUTE'; route: SavedRoute }
   | { type: 'ADD_CONTACT'; contact: TrustedContact }
+  | { type: 'RECORD_INCIDENT'; incident: IncidentRecord }
+  | { type: 'RESOLVE_INCIDENT'; id: string; status: Extract<IncidentStatus, 'dismissed' | 'recorded'> }
   | { type: 'HYDRATE_PREFERENCES'; preferences: CommutePreferences }
   | { type: 'RESET_PREFERENCES' }
   | { type: 'OPEN_SOS' }
@@ -65,6 +91,8 @@ export type CommuteAction =
 export const initialCommuteState: CommuteState = {
   screen: 'track',
   phase: 'idle',
+  activeRouteId: null,
+  startedAt: null,
   locationStatus: 'off',
   batteryPercent: 50,
   lowPowerMode: false,
@@ -82,6 +110,7 @@ export const initialCommuteState: CommuteState = {
   },
   contacts: [],
   routes: [],
+  incidents: [],
 };
 
 export type TrackingProfile = {
@@ -106,16 +135,27 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       return { ...state, screen: action.screen };
     case 'START_REQUESTED':
       if (state.phase !== 'idle') return state;
-      return { ...state, phase: 'starting', locationStatus: 'requesting' };
+      return {
+        ...state,
+        phase: 'starting',
+        activeRouteId: state.routes.some((route) => route.id === action.routeId) ? action.routeId ?? null : null,
+        locationStatus: 'requesting',
+      };
     case 'START_SUCCEEDED':
-      return { ...state, phase: 'active', locationStatus: 'live', lastCheckInAt: Date.now() };
+      return {
+        ...state,
+        phase: 'active',
+        locationStatus: 'live',
+        startedAt: action.timestamp ?? Date.now(),
+        lastCheckInAt: action.timestamp ?? Date.now(),
+      };
     case 'START_FAILED':
-      return { ...state, phase: 'idle', locationStatus: action.status };
+      return { ...state, phase: 'idle', activeRouteId: null, startedAt: null, locationStatus: action.status };
     case 'LOCATION_LOST':
       if (state.phase !== 'active') return state;
       return { ...state, locationStatus: 'unavailable' };
     case 'END_COMMUTE':
-      return { ...state, phase: 'idle', locationStatus: 'off', lastCheckInAt: action.timestamp };
+      return { ...state, phase: 'idle', activeRouteId: null, startedAt: null, locationStatus: 'off', lastCheckInAt: action.timestamp };
     case 'CHECK_IN':
       if (state.phase !== 'active') return state;
       return { ...state, lastCheckInAt: action.timestamp };
@@ -141,6 +181,16 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       if (state.contacts.length >= 10) return state;
       if (state.contacts.some((contact) => normalizePhone(contact.phone) === normalizePhone(action.contact.phone))) return state;
       return { ...state, contacts: [...state.contacts, action.contact] };
+    case 'RECORD_INCIDENT':
+      if (state.incidents.some((incident) => incident.id === action.incident.id)) return state;
+      return { ...state, incidents: [action.incident, ...state.incidents].slice(0, 100) };
+    case 'RESOLVE_INCIDENT':
+      return {
+        ...state,
+        incidents: state.incidents.map((incident) => (
+          incident.id === action.id ? { ...incident, status: action.status } : incident
+        )),
+      };
     case 'HYDRATE_PREFERENCES':
       return { ...state, ...action.preferences };
     case 'RESET_PREFERENCES':
@@ -150,6 +200,8 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
         sensors: initialCommuteState.sensors,
         contacts: [],
         routes: [],
+        incidents: [],
+        activeRouteId: null,
       };
     case 'OPEN_SOS':
       return { ...state, sosActive: true };
@@ -166,6 +218,7 @@ export function selectCommutePreferences(state: CommuteState): CommutePreference
     sensors: state.sensors,
     contacts: state.contacts,
     routes: state.routes,
+    incidents: state.incidents,
   };
 }
 

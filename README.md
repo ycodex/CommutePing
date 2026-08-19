@@ -2,11 +2,17 @@
 
 Android and iOS implementation of Commute Ping, built with Expo and React Native.
 
-## Implemented in this first slice
+## Implemented
 
 - Figma-inspired dark mobile interface with Track, Routes, Alerts, and Safety screens
 - Explicit one-tap commute start and safe-arrival closure
-- Searchable Android/iOS route planner with map-tap selection, current-location selection, and locally saved start/destination coordinates
+- Guided Android/iOS route planner with separate start/destination selection, place search results, map-tap selection, current-location selection, swap control, schedule presets, and locally saved coordinates
+- Saved-route selection before commute start, with the selected route and current GPS position shown on the Track screen
+- Accuracy-aware route-deviation engine with repeated-sample confirmation and recovery hysteresis for road-following route geometry
+- Expected-arrival status with a 10-minute late grace window and locally recorded late incidents
+- Accuracy-aware prolonged-idle checks that prompt after 8 minutes without meaningful movement
+- Conservative, experimental fall and snatch candidate classifiers using accelerometer and gyroscope readings, with a 10-second cancellation screen
+- Local incident history for check-ins, late arrival, idle, battery, route-deviation, sensor candidates, and manual SOS events
 - Contextual contact permission and native phone-contact picker that prefills the local trusted-contact form
 - Foreground location permission and live location updates during an active commute
 - Battery-aware tracking profiles: Precise, Balanced, and Saver
@@ -33,7 +39,9 @@ npm run ios
 
 The first commute start asks for foreground location permission. Location is displayed on this device only. Motion sensors run only while a commute is active and the corresponding safety setting is enabled.
 
-The route planner works in Expo Go on Android and iOS. A standalone Android release requires a restricted Google Maps SDK key before store distribution; do not commit that key to the repository.
+The route planner and active-commute map work in Expo Go on Android and iOS. Routes created by the current picker are endpoint previews, not turn-by-turn road paths, so the app intentionally does not raise deviation warnings for them. A routing provider must supply road-following geometry before monitoring is enabled.
+
+A standalone Android release requires a restricted Google Maps SDK key before store distribution; do not commit that key to the repository. Google Places/Routes web-service credentials should be held by a backend, not embedded in the public mobile bundle.
 
 ## Web preview
 
@@ -67,10 +75,12 @@ npx expo-doctor@latest
 
 ## Not connected yet
 
-This slice does not send data to trusted contacts. Background tracking, remote push notifications, automated calls, camera evidence capture, authentication, encrypted backend storage, server-side escalation, automated route learning, fall/snatch classification, and cell-tower fallback are not connected. The UI labels these capabilities accordingly.
+This build does not send data to trusted contacts. Google road routing, automatic rerouting, background tracking, remote push notifications, automated calls, camera evidence capture, authentication, encrypted backend storage, server-side escalation, automated route learning, production-trained motion classification, and cell-tower fallback are not connected. The UI labels these capabilities accordingly.
+
+Fall/snatch candidates, ETA, battery, idle, and route checks currently run only while the app is open in an active foreground commute. Sensor thresholds are deliberately conservative and experimental; they open an on-device cancellation flow and never contact emergency services automatically.
 
 Commute Ping is an assistive coordination tool. It must not claim to guarantee rescue or emergency response.
 
 ## Suggested next milestone
 
-Add consent-based onboarding and authentication, then build the trusted-circle backend and background commute session before enabling remote notifications or escalation.
+Add a backend-held Google Places/Routes integration that upgrades endpoint previews to road-following geometry, then add consent-based onboarding, authentication, and trusted-circle commute sessions before enabling remote notifications or escalation.

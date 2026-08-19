@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import type { SymbolViewProps } from 'expo-symbols';
-import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -23,17 +23,29 @@ import {
   trackingProfileForBattery,
   type AlertRuleKey,
   type AppScreen,
+  type IncidentRecord,
+  type RouteCoordinate,
   type SensorKey,
   type SavedRoute,
   type TrustedContact,
 } from '@/domain/commute';
-import type { LocationRuntimeStatus } from '@/hooks/use-commute-location';
+import { commuteTimingAt, type CommuteTiming, type IdleMonitorState } from '@/domain/commute-monitoring';
+import type { RouteDeviationState } from '@/domain/route-deviation';
+import type { CommuteLocation, LocationRuntimeStatus } from '@/hooks/use-commute-location';
 import { useCommutePreferences } from '@/hooks/use-commute-preferences';
 import { useCommuteLocation } from '@/hooks/use-commute-location';
 import { useBatteryState, useMotionReadings } from '@/hooks/use-device-safety';
+import {
+  useCommuteClock,
+  useIdleMonitor,
+  useMotionSafetyCandidate,
+  type MotionSafetyCandidate,
+} from '@/hooks/use-commute-intelligence';
+import { useRouteDeviation } from '@/hooks/use-route-deviation';
 import { contactSetupForResult, type ContactPrefill } from '@/features/contacts/contact-import';
 import { pickDeviceContact } from '@/features/contacts/device-contact-picker';
 import { RoutePickerModal } from '@/features/routes/route-picker-modal';
+import { ActiveCommuteMap } from './active-commute-map';
 
 const icons = {
   track: { ios: 'location.fill', android: 'location_on', web: 'location_on' },
@@ -61,6 +73,26 @@ const icons = {
 
 type ToastState = { id: number; message: string } | null;
 type IconName = SymbolViewProps['name'];
+
+function createLocalIncident({
+  kind,
+  title,
+  detail,
+  status = 'open',
+  routeId,
+  id,
+  createdAt = Date.now(),
+}: Omit<IncidentRecord, 'id' | 'createdAt' | 'status'> & { id?: string; createdAt?: number; status?: IncidentRecord['status'] }): IncidentRecord {
+  return {
+    id: id ?? `${kind}-${createdAt}`,
+    kind,
+    title,
+    detail,
+    createdAt,
+    status,
+    ...(routeId ? { routeId } : {}),
+  };
+}
 
 function Card({ children, style }: { children: ReactNode; style?: object }) {
   return <View style={[styles.card, style]}>{children}</View>;
@@ -150,29 +182,153 @@ function SchematicMap({
   );
 }
 
+function RouteSelector({
+  routes,
+  selectedRouteId,
+  onSelect,
+}: {
+  routes: SavedRoute[];
+  selectedRouteId: string | null;
+  onSelect: (routeId: string) => void;
+}) {
+  if (routes.length === 0) {
+    return (
+      <Card style={styles.routeSetupCard}>
+        <Text style={styles.routeSelectorLabel}>PLANNED ROUTE</Text>
+        <Text style={styles.cardTitle}>No route selected</Text>
+        <Text style={styles.cardCopy}>Add a route from the Routes tab to see it here during a commute.</Text>
+      </Card>
+    );
+  }
+
+  return (
+    <View style={styles.routeSelector}>
+      <Text style={styles.routeSelectorLabel}>SELECT TODAY&apos;S ROUTE</Text>
+      <ScrollView horizontal contentContainerStyle={styles.routeSelectorContent} showsHorizontalScrollIndicator={false}>
+        {routes.map((route) => {
+          const selected = route.id === selectedRouteId;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              key={route.id}
+              onPress={() => onSelect(route.id)}
+              style={[styles.routeChoice, selected && styles.routeChoiceSelected]}
+            >
+              <View style={styles.routeChoiceHeader}>
+                <AppIcon name={icons.routes} size={14} color={selected ? '#AFC5FF' : palette.muted} />
+                <Text numberOfLines={1} style={[styles.routeChoiceTitle, selected && styles.routeChoiceTitleSelected]}>{route.title}</Text>
+              </View>
+              <Text numberOfLines={1} style={styles.routeChoiceSchedule}>{route.schedule} · {route.durationMinutes} min</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+function ActiveRouteCard({
+  route,
+  routeCoordinates,
+  currentLocation,
+  active,
+  locationStatus,
+  monitoringAvailable,
+  deviation,
+}: {
+  route: SavedRoute;
+  routeCoordinates: RouteCoordinate[];
+  currentLocation: CommuteLocation | null;
+  active: boolean;
+  locationStatus: LocationRuntimeStatus;
+  monitoringAvailable: boolean;
+  deviation: RouteDeviationState;
+}) {
+  const { copy, color } = routeStatus(active, locationStatus, monitoringAvailable, deviation);
+  return (
+    <View style={styles.activeRouteMap}>
+      <ActiveCommuteMap coordinates={routeCoordinates} currentLocation={currentLocation} />
+      <View style={styles.activeRouteTitleBadge}>
+        <AppIcon name={icons.routes} size={12} color={palette.text} />
+        <Text numberOfLines={1} style={styles.activeRouteTitle}>{route.title}</Text>
+      </View>
+      <View style={styles.activeRouteStatusBadge}>
+        <View style={[styles.routeStatusDot, { backgroundColor: color }]} />
+        <Text numberOfLines={2} style={styles.activeRouteStatus}>{copy}</Text>
+      </View>
+    </View>
+  );
+}
+
+function routeStatus(
+  active: boolean,
+  locationStatus: LocationRuntimeStatus,
+  monitoringAvailable: boolean,
+  deviation: RouteDeviationState,
+): { copy: string; color: string } {
+  if (!active) return { copy: monitoringAvailable ? 'Road route ready for monitoring' : 'Endpoint preview · select Start Commute', color: palette.blue };
+  if (locationStatus === 'requesting') return { copy: 'Getting current location…', color: palette.amber };
+  if (locationStatus !== 'live') return { copy: 'Live location unavailable', color: palette.amber };
+  if (!monitoringAvailable) return { copy: 'Live GPS · deviation waits for a road route', color: palette.amber };
+  if (deviation.status === 'deviated') {
+    const distance = deviation.distanceFromRouteMeters === null ? '' : ` · ${Math.round(deviation.distanceFromRouteMeters)} m away`;
+    const signal = deviation.sampleQuality === 'poor-accuracy' ? ' · GPS signal now weak' : '';
+    return { copy: `Route deviation detected${distance}${signal}`, color: palette.red };
+  }
+  if (deviation.sampleQuality === 'waiting') return { copy: 'Waiting for the first accurate route sample', color: palette.amber };
+  if (deviation.sampleQuality === 'poor-accuracy') return { copy: 'GPS accuracy is too low to judge deviation', color: palette.amber };
+  if (deviation.status === 'checking') return { copy: 'Possible deviation · checking again', color: palette.amber };
+  return { copy: 'On planned route', color: palette.green };
+}
+
+function timingStatusCopy(timing: CommuteTiming): string {
+  if (timing.status === 'late') return `${Math.abs(timing.remainingMinutes)} min late`;
+  if (timing.status === 'due-soon') return timing.remainingMinutes <= 0 ? 'In grace period' : `${timing.remainingMinutes} min left`;
+  return `${timing.remainingMinutes} min left`;
+}
+
 function TrackScreen({
   phase,
+  routes,
+  selectedRouteId,
+  displayedRoute,
+  routeCoordinates,
+  routeMonitoringAvailable,
+  routeDeviation,
+  timing,
+  idleStatus,
+  currentLocation,
   batteryPercent,
   lowPowerMode,
   profileLabel,
   locationStatus,
-  accuracy,
   acceleration,
   rotation,
   motionAvailable,
+  onSelectRoute,
   onStart,
   onEnd,
   onCheckIn,
 }: {
   phase: 'idle' | 'starting' | 'active';
+  routes: SavedRoute[];
+  selectedRouteId: string | null;
+  displayedRoute: SavedRoute | null;
+  routeCoordinates: RouteCoordinate[];
+  routeMonitoringAvailable: boolean;
+  routeDeviation: RouteDeviationState;
+  timing: CommuteTiming | null;
+  idleStatus: IdleMonitorState['status'];
+  currentLocation: CommuteLocation | null;
   batteryPercent: number | null;
   lowPowerMode: boolean;
   profileLabel: string;
   locationStatus: LocationRuntimeStatus;
-  accuracy: number | null;
   acceleration: number;
   rotation: number;
   motionAvailable: boolean;
+  onSelectRoute: (routeId: string) => void;
   onStart: () => void;
   onEnd: () => void;
   onCheckIn: () => void;
@@ -181,7 +337,20 @@ function TrackScreen({
   return (
     <ScrollView testID="track-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
       <ScreenTitle title="Commute Ping" subtitle="Foreground commute tracking" />
-      <SchematicMap active={active} locationStatus={locationStatus} accuracy={accuracy} />
+      {phase === 'idle' && <RouteSelector routes={routes} selectedRouteId={selectedRouteId} onSelect={onSelectRoute} />}
+      {displayedRoute ? (
+        <ActiveRouteCard
+          active={active}
+          currentLocation={currentLocation}
+          deviation={routeDeviation}
+          locationStatus={locationStatus}
+          monitoringAvailable={routeMonitoringAvailable}
+          route={displayedRoute}
+          routeCoordinates={routeCoordinates}
+        />
+      ) : (
+        <SchematicMap active={active} locationStatus={locationStatus} accuracy={currentLocation?.accuracy ?? null} />
+      )}
 
       <View style={styles.commuteSegment}>
         <Pressable accessibilityRole={active ? 'button' : undefined} onPress={active ? onCheckIn : undefined} style={[styles.segmentButton, !active && styles.segmentButtonSelected]}>
@@ -197,6 +366,21 @@ function TrackScreen({
           <Text style={[styles.segmentLabel, active && styles.segmentActiveLabel]}>{phase === 'starting' ? 'Getting location…' : active ? 'End Commute' : 'Start Commute'}</Text>
         </Pressable>
       </View>
+
+      {active && (
+        <View style={styles.insightGrid}>
+          <Card style={styles.insightCard}>
+            <View style={styles.metricLabelRow}><AppIcon name={icons.clock} size={13} color={timing?.status === 'late' ? palette.red : palette.green} /><Text style={styles.metricLabel}>EXPECTED ARRIVAL</Text></View>
+            <Text style={styles.insightValue}>{timing ? formatClockTime(timing.expectedArrivalAt) : 'No route ETA'}</Text>
+            <Text style={[styles.insightMeta, timing?.status === 'late' && { color: palette.red }]}>{timing ? timingStatusCopy(timing) : 'Choose a planned route'}</Text>
+          </Card>
+          <Card style={styles.insightCard}>
+            <View style={styles.metricLabelRow}><AppIcon name={icons.motion} size={13} color={idleStatus === 'idle' ? palette.amber : palette.blue} /><Text style={styles.metricLabel}>MOVEMENT CHECK</Text></View>
+            <Text style={styles.insightValue}>{idleStatus === 'idle' ? 'Idle detected' : idleStatus === 'stationary' ? 'Stationary' : 'Moving'}</Text>
+            <Text style={styles.insightMeta}>{idleStatus === 'idle' ? 'Check-in recommended' : 'On-device only'}</Text>
+          </Card>
+        </View>
+      )}
 
       <View style={styles.metricGrid}>
         <Card style={styles.metricCard}>
@@ -215,13 +399,17 @@ function TrackScreen({
           {active && motionAvailable ? <MetricChart type="bars" value={acceleration} /> : <Text style={styles.sensorOffText}>{active ? 'Waiting for sensor' : 'OFF'}</Text>}
         </Card>
         <Card style={[styles.metricCard, styles.sensorMetric]}>
-          <View style={styles.sensorMetricHeader}><View style={styles.metricLabelRow}><AppIcon name={icons.speed} size={14} color="#FF7180" /><Text style={[styles.metricLabel, { color: '#FF9DA6' }]}>VELOCITY</Text></View><View style={[styles.liveDot, { backgroundColor: palette.red }]} /></View>
+          <View style={styles.sensorMetricHeader}><View style={styles.metricLabelRow}><AppIcon name={icons.speed} size={14} color="#FF7180" /><Text style={[styles.metricLabel, { color: '#FF9DA6' }]}>ROTATION</Text></View><View style={[styles.liveDot, { backgroundColor: palette.red }]} /></View>
           {active && motionAvailable ? <MetricChart type="line" value={rotation} /> : <Text style={styles.sensorOffText}>{active ? 'Waiting for sensor' : 'OFF'}</Text>}
         </Card>
       </View>
-      <Text style={styles.privacyCaption}>Tracking stops automatically when you end the commute.</Text>
+      <Text style={styles.privacyCaption}>Tracking and route checks stop automatically when you end the commute.</Text>
     </ScrollView>
   );
+}
+
+function formatClockTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => void }) {
@@ -243,7 +431,7 @@ function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => vo
               {route.origin && route.destination && (
                 <Text numberOfLines={1} style={styles.routePlaces}>{route.origin.label} → {route.destination.label}</Text>
               )}
-              <Text style={styles.cardCopy}>{route.schedule} · {route.durationMinutes} min</Text>
+              <Text style={styles.cardCopy}>{route.schedule} · {route.durationMinutes} min · {route.geometry?.source === 'road' ? 'Road path' : 'Endpoint preview'}</Text>
             </View>
             <AppIcon name={route.learned ? icons.chevron : icons.check} size={17} color={route.learned ? palette.mutedDark : palette.green} />
           </View>
@@ -254,24 +442,34 @@ function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => vo
         <Text style={styles.saveRouteText}>Add Planned Route</Text>
       </Pressable>
       <Card style={styles.patternCard}>
-        <Text style={styles.patternTitle}>Pattern Monitoring — Not Connected</Text>
-        <Text style={styles.patternCopy}>Saved routes are local planning data in this build. Deviation detection and trusted-circle notifications require the backend milestone.</Text>
+        <Text style={styles.patternTitle}>Route Monitoring Foundation</Text>
+        <Text style={styles.patternCopy}>Choose a saved route before starting. The app follows live GPS and can detect sustained deviation when a routing provider supplies a road-following path. Endpoint previews are never treated as real roads.</Text>
       </Card>
     </ScrollView>
   );
 }
 
 const alertRows: { key: AlertRuleKey; title: string; copy: string; icon: IconName }[] = [
-  { key: 'connectivity', title: 'Connectivity Lost', copy: 'Save a future preference for data-loss alerts', icon: icons.wifiOff },
-  { key: 'battery', title: 'Critical Battery', copy: 'Save a future preference for low-battery alerts', icon: icons.battery },
-  { key: 'idle', title: 'Prolonged Idle', copy: 'Save a future preference for stationary prompts', icon: icons.clock },
-  { key: 'calls', title: 'Auto-Confirm Calls', copy: 'Save a future preference for consent-based calls', icon: icons.call },
+  { key: 'connectivity', title: 'Connectivity Lost', copy: 'Saved for the background-network integration', icon: icons.wifiOff },
+  { key: 'battery', title: 'Critical Battery', copy: 'Record an on-device warning below 15% during a commute', icon: icons.battery },
+  { key: 'idle', title: 'Prolonged Idle', copy: 'Prompt after 8 minutes without meaningful movement', icon: icons.clock },
+  { key: 'calls', title: 'Auto-Confirm Calls', copy: 'Saved for the consent-based calling backend', icon: icons.call },
 ];
 
-function AlertsScreen({ rules, onToggle }: { rules: typeof initialCommuteState.rules; onToggle: (key: AlertRuleKey) => void }) {
+function AlertsScreen({
+  rules,
+  incidents,
+  onToggle,
+  onResolveIncident,
+}: {
+  rules: typeof initialCommuteState.rules;
+  incidents: IncidentRecord[];
+  onToggle: (key: AlertRuleKey) => void;
+  onResolveIncident: (id: string) => void;
+}) {
   return (
     <ScrollView testID="alerts-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
-      <ScreenTitle title="Future Alert Preferences" subtitle="Saved locally · delivery not connected" />
+      <ScreenTitle title="Alerts & History" subtitle="On-device monitoring · remote delivery not connected" />
       <View style={styles.stack}>
         {alertRows.map((row) => (
           <Card key={row.key} style={[styles.ruleCard, !rules[row.key] && styles.ruleDisabled]}>
@@ -281,14 +479,52 @@ function AlertsScreen({ rules, onToggle }: { rules: typeof initialCommuteState.r
           </Card>
         ))}
       </View>
-      <Text style={styles.sectionDisclaimer}>These switches save preferences only. No notification, message, or call is sent in this build.</Text>
+      <Text style={styles.sectionDisclaimer}>Battery and idle rules run during an active foreground commute. Connectivity delivery and automated calls still require the backend.</Text>
+
+      <View style={styles.historyHeader}>
+        <Text style={styles.historyTitle}>RECENT INCIDENTS</Text>
+        <Text style={styles.historyCount}>{incidents.length}</Text>
+      </View>
+      {incidents.length === 0 ? (
+        <Card style={styles.emptyCard}>
+          <Text style={styles.cardTitle}>No incidents recorded</Text>
+          <Text style={styles.cardCopy}>Late arrivals, prolonged idle, sensor candidates, route deviations, and check-ins appear here.</Text>
+        </Card>
+      ) : (
+        <View style={styles.stack}>
+          {incidents.slice(0, 20).map((incident) => (
+            <Card key={incident.id} style={styles.incidentCard}>
+              <View style={[styles.incidentIcon, incident.status === 'open' && styles.incidentIconOpen]}>
+                <AppIcon name={incident.kind === 'check-in' ? icons.check : incident.kind === 'late' || incident.kind === 'idle' ? icons.clock : incident.kind === 'battery' ? icons.battery : incident.kind === 'deviation' ? icons.routes : icons.shield} size={17} color={incident.status === 'open' ? '#FF8D98' : '#AFC5FF'} />
+              </View>
+              <View style={styles.flexOne}>
+                <View style={styles.incidentTitleRow}>
+                  <Text style={styles.cardTitle}>{incident.title}</Text>
+                  <Text style={[styles.incidentStatus, incident.status === 'open' && styles.incidentStatusOpen]}>{incident.status.toUpperCase()}</Text>
+                </View>
+                <Text style={styles.cardCopy}>{incident.detail}</Text>
+                <Text style={styles.incidentTime}>{formatIncidentTime(incident.createdAt)}</Text>
+                {incident.status === 'open' && (
+                  <Pressable accessibilityRole="button" onPress={() => onResolveIncident(incident.id)} style={styles.reviewButton}>
+                    <Text style={styles.reviewButtonText}>Mark reviewed</Text>
+                  </Pressable>
+                )}
+              </View>
+            </Card>
+          ))}
+        </View>
+      )}
     </ScrollView>
   );
 }
 
+function formatIncidentTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
 const sensorRows: { key: SensorKey; title: string; copy: string; label: string; icon: IconName }[] = [
-  { key: 'snatch', title: 'Phone Snatch Sensor', copy: 'Preview accelerometer readings; detection is not connected', label: 'ACCELEROMETER READY', icon: icons.speed },
-  { key: 'fall', title: 'Fall Sensor', copy: 'Preview motion readings; detection is not connected', label: 'GYROSCOPE READY', icon: icons.motion },
+  { key: 'snatch', title: 'Phone Snatch Sensor', copy: 'Requires repeated acceleration and rotation spikes', label: 'MOTION MODEL READY', icon: icons.speed },
+  { key: 'fall', title: 'Fall Sensor', copy: 'Checks for free-fall followed by impact and rotation', label: 'MOTION MODEL READY', icon: icons.motion },
 ];
 
 function SafetyScreen({
@@ -345,7 +581,7 @@ function SafetyScreen({
       <Pressable accessibilityRole="button" onPress={onClearLocalData} style={styles.clearDataButton}>
         <Text style={styles.clearDataText}>Clear Local Data</Text>
       </Pressable>
-      <Text style={styles.sectionDisclaimer}>This build reads sensors but does not classify falls or snatches and does not trigger emergency response.</Text>
+      <Text style={styles.sectionDisclaimer}>Detection is experimental and runs only during an active foreground commute. A candidate opens a 10-second cancellation screen; it never contacts emergency services by itself.</Text>
     </ScrollView>
   );
 }
@@ -390,6 +626,54 @@ function SosModal({ visible, onCancel }: { visible: boolean; onCancel: () => voi
         <Pressable accessibilityLabel="Close SOS demo" accessibilityRole="button" onPress={onCancel} style={styles.cancelSosButton}><Text style={styles.cancelSosText}>CLOSE DEMO</Text></Pressable>
         <Text style={styles.sosDisclaimer}>No location, image, message, or call leaves this device.</Text>
       </SafeAreaView>
+    </Modal>
+  );
+}
+
+function SafetyCandidateModal({
+  candidate,
+  onSafe,
+  onEscalate,
+}: {
+  candidate: MotionSafetyCandidate;
+  onSafe: () => void;
+  onEscalate: () => void;
+}) {
+  const deadline = candidate.detectedAt + 10_000;
+  const [remainingSeconds, setRemainingSeconds] = useState(() => Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)));
+  const escalationRef = useRef(onEscalate);
+  const triggeredRef = useRef(false);
+
+  useEffect(() => {
+    escalationRef.current = onEscalate;
+  }, [onEscalate]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1_000));
+      setRemainingSeconds(remaining);
+      if (remaining === 0 && !triggeredRef.current) {
+        triggeredRef.current = true;
+        escalationRef.current();
+      }
+    }, 250);
+    return () => clearInterval(timer);
+  }, [deadline]);
+
+  const title = candidate.kind === 'fall' ? 'Possible fall detected' : 'Possible phone snatch';
+  return (
+    <Modal animationType="fade" transparent onRequestClose={onSafe} visible>
+      <View style={styles.modalBackdropCentered}>
+        <View style={styles.candidateModal}>
+          <View style={styles.candidateAlertIcon}><AppIcon name={candidate.kind === 'fall' ? icons.motion : icons.speed} size={27} color="#FF8994" /></View>
+          <Text accessibilityRole="header" style={styles.candidateTitle}>{title}</Text>
+          <Text style={styles.candidateCopy}>Motion matched the experimental {candidate.kind} pattern. Confirm that you are safe to cancel.</Text>
+          <View style={styles.countdownCircle}><Text style={styles.countdownValue}>{remainingSeconds}</Text><Text style={styles.countdownLabel}>SECONDS</Text></View>
+          <Pressable accessibilityRole="button" onPress={onSafe} style={styles.safeButton}><Text style={styles.safeButtonText}>I&apos;M SAFE — CANCEL</Text></Pressable>
+          <Pressable accessibilityRole="button" onPress={onEscalate} style={styles.localSosButton}><Text style={styles.localSosText}>Open local SOS now</Text></Pressable>
+          <Text style={styles.candidateDisclaimer}>Countdown opens the local SOS screen only. No call or message is sent.</Text>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -452,7 +736,7 @@ function ClearDataModal({ visible, onCancel, onConfirm }: { visible: boolean; on
         <View style={styles.confirmModal}>
           <View style={styles.contactModalIcon}><AppIcon name={icons.lock} size={22} color="#FF7A84" /></View>
           <Text style={styles.contactModalTitle}>Clear local data?</Text>
-          <Text style={styles.contactModalCopy}>This removes saved contacts, routes, and preferences from this device. It cannot be undone.</Text>
+          <Text style={styles.contactModalCopy}>This removes saved contacts, routes, incident history, and preferences from this device. It cannot be undone.</Text>
           <View style={styles.confirmActions}>
             <Pressable accessibilityRole="button" onPress={onCancel} style={styles.confirmCancel}><Text style={styles.confirmCancelText}>Cancel</Text></Pressable>
             <Pressable accessibilityRole="button" onPress={onConfirm} style={styles.confirmDelete}><Text style={styles.confirmDeleteText}>Clear Data</Text></Pressable>
@@ -472,14 +756,100 @@ export function CommutePingApp() {
   const [contactAccessMessage, setContactAccessMessage] = useState('Enter contact details manually.');
   const [contactPickerBusy, setContactPickerBusy] = useState(false);
   const [routeModal, setRouteModal] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [clearDataModal, setClearDataModal] = useState(false);
+  const deviationAlertedRouteRef = useRef<string | null>(null);
   const battery = useBatteryState();
   const commuteLocation = useCommuteLocation();
   const motion = useMotionReadings(state.phase === 'active' && (state.sensors.fall || state.sensors.snatch));
   const trackingProfile = useMemo(() => trackingProfileForBattery(state.batteryPercent, state.lowPowerMode), [state.batteryPercent, state.lowPowerMode]);
-  const preferences = useMemo(() => ({ rules: state.rules, sensors: state.sensors, contacts: state.contacts, routes: state.routes }), [state.rules, state.sensors, state.contacts, state.routes]);
+  const preferences = useMemo(() => ({ rules: state.rules, sensors: state.sensors, contacts: state.contacts, routes: state.routes, incidents: state.incidents }), [state.rules, state.sensors, state.contacts, state.routes, state.incidents]);
   const hydratePreferences = useCallback((stored: typeof preferences) => dispatch({ type: 'HYDRATE_PREFERENCES', preferences: stored }), []);
   const persistedPreferences = useCommutePreferences(preferences, hydratePreferences);
+  const selectedRoute = useMemo(
+    () => state.routes.find((route) => route.id === selectedRouteId) ?? state.routes[0] ?? null,
+    [selectedRouteId, state.routes],
+  );
+  const activeRoute = useMemo(
+    () => state.routes.find((route) => route.id === state.activeRouteId) ?? null,
+    [state.activeRouteId, state.routes],
+  );
+  const displayedRoute = state.phase === 'idle' ? selectedRoute : activeRoute;
+  const routeTracking = useRouteDeviation(
+    state.phase === 'active',
+    displayedRoute,
+    commuteLocation.location,
+  );
+  const commuteClock = useCommuteClock(state.phase === 'active');
+  const idleMonitor = useIdleMonitor(state.phase === 'active', commuteLocation.location);
+  const motionSafety = useMotionSafetyCandidate(state.phase === 'active', motion, state.sensors);
+  const timing = state.phase === 'active' && activeRoute && state.startedAt !== null
+    ? commuteTimingAt(state.startedAt, activeRoute.durationMinutes, commuteClock)
+    : null;
+
+  useEffect(() => {
+    if (routeTracking.deviation.status === 'deviated' && activeRoute) {
+      if (deviationAlertedRouteRef.current === activeRoute.id) return;
+      deviationAlertedRouteRef.current = activeRoute.id;
+      dispatch({
+        type: 'RECORD_INCIDENT',
+        incident: createLocalIncident({
+          id: `deviation-${state.startedAt ?? Date.now()}`,
+          kind: 'deviation',
+          title: 'Route deviation detected',
+          detail: routeTracking.deviation.distanceFromRouteMeters === null
+            ? `Commute moved away from ${activeRoute.title}.`
+            : `Commute was about ${Math.round(routeTracking.deviation.distanceFromRouteMeters)} m from ${activeRoute.title}.`,
+          routeId: activeRoute.id,
+        }),
+      });
+      setToast({ id: Date.now(), message: `Possible deviation from ${activeRoute.title} · check the map` });
+      return;
+    }
+    if (routeTracking.deviation.status === 'on-route') deviationAlertedRouteRef.current = null;
+  }, [activeRoute, routeTracking.deviation.distanceFromRouteMeters, routeTracking.deviation.status, state.startedAt]);
+
+  useEffect(() => {
+    if (state.phase !== 'active' || state.startedAt === null || timing?.status !== 'late' || !activeRoute) return;
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        id: `late-${state.startedAt}`,
+        kind: 'late',
+        title: 'Expected arrival passed',
+        detail: `${activeRoute.title} is ${Math.abs(timing.remainingMinutes)} minutes past its expected arrival window.`,
+        routeId: activeRoute.id,
+      }),
+    });
+  }, [activeRoute, state.phase, state.startedAt, timing?.remainingMinutes, timing?.status]);
+
+  useEffect(() => {
+    if (state.phase !== 'active' || state.startedAt === null || idleMonitor.status !== 'idle' || !state.rules.idle) return;
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        id: `idle-${state.startedAt}`,
+        kind: 'idle',
+        title: 'Prolonged idle detected',
+        detail: 'No meaningful movement was detected for 8 minutes. A check-in is recommended.',
+        routeId: activeRoute?.id,
+      }),
+    });
+  }, [activeRoute?.id, idleMonitor.status, state.phase, state.rules.idle, state.startedAt]);
+
+  useEffect(() => {
+    if (state.phase !== 'active' || state.startedAt === null || !state.rules.battery || state.batteryPercent > 15) return;
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        id: `battery-${state.startedAt}`,
+        kind: 'battery',
+        title: 'Critical battery',
+        detail: `Battery reached ${state.batteryPercent}% during the commute. Battery-saver tracking is active.`,
+        routeId: activeRoute?.id,
+      }),
+    });
+  }, [activeRoute?.id, state.batteryPercent, state.phase, state.rules.battery, state.startedAt]);
 
   useEffect(() => {
     if (battery.batteryPercent === null) return;
@@ -501,7 +871,7 @@ export function CommutePingApp() {
   const notify = (message: string) => setToast({ id: Date.now(), message });
 
   const startCommute = async () => {
-    dispatch({ type: 'START_REQUESTED' });
+    dispatch({ type: 'START_REQUESTED', routeId: selectedRoute?.id ?? null });
     const result = await commuteLocation.start(trackingProfile);
     if (!result.ok) {
       dispatch({ type: 'START_FAILED', status: result.reason });
@@ -513,14 +883,83 @@ export function CommutePingApp() {
       );
       return;
     }
-    dispatch({ type: 'START_SUCCEEDED' });
-    notify('Commute started · location is visible on this device only');
+    dispatch({ type: 'START_SUCCEEDED', timestamp: Date.now() });
+    notify(selectedRoute ? `${selectedRoute.title} started · location stays on this device` : 'Commute started · location is visible on this device only');
   };
 
   const endCommute = () => {
+    const endedAt = Date.now();
     commuteLocation.stop();
-    dispatch({ type: 'END_COMMUTE', timestamp: Date.now() });
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        kind: 'check-in',
+        title: 'Safe arrival recorded',
+        detail: activeRoute ? `${activeRoute.title} was ended by the commuter.` : 'The commute was ended by the commuter.',
+        status: 'recorded',
+        routeId: activeRoute?.id,
+        createdAt: endedAt,
+      }),
+    });
+    dispatch({ type: 'END_COMMUTE', timestamp: endedAt });
     notify('Local safe arrival recorded · foreground location stopped');
+  };
+
+  const checkIn = () => {
+    const checkedInAt = Date.now();
+    dispatch({ type: 'CHECK_IN', timestamp: checkedInAt });
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        kind: 'check-in',
+        title: 'Manual check-in',
+        detail: activeRoute ? `Checked in during ${activeRoute.title}.` : 'Checked in during an active commute.',
+        status: 'recorded',
+        routeId: activeRoute?.id,
+        createdAt: checkedInAt,
+      }),
+    });
+    notify('Local check-in recorded · nothing was sent');
+  };
+
+  const respondToMotionCandidate = (safe: boolean) => {
+    const candidate = motionSafety.candidate;
+    if (!candidate) return;
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        id: `${candidate.kind}-${candidate.detectedAt}`,
+        kind: candidate.kind,
+        title: candidate.kind === 'fall' ? 'Possible fall' : 'Possible phone snatch',
+        detail: `${candidate.accelerationG.toFixed(1)} g acceleration · ${candidate.rotationRadians.toFixed(1)} rad/s rotation. ${safe ? 'Cancelled as safe.' : 'Local SOS screen opened.'}`,
+        status: safe ? 'dismissed' : 'open',
+        routeId: activeRoute?.id,
+        createdAt: candidate.detectedAt,
+      }),
+    });
+    motionSafety.clearCandidate();
+    if (safe) {
+      notify('Motion alert cancelled and recorded locally');
+      return;
+    }
+    dispatch({ type: 'OPEN_SOS' });
+    notify('Local SOS opened · no call or message was sent');
+  };
+
+  const openLocalSos = () => {
+    const openedAt = Date.now();
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        kind: 'sos',
+        title: 'Local SOS opened',
+        detail: 'The emergency preview was opened manually. No external alert was sent.',
+        status: 'open',
+        routeId: activeRoute?.id,
+        createdAt: openedAt,
+      }),
+    });
+    dispatch({ type: 'OPEN_SOS' });
   };
 
   const addTrustedContact = async () => {
@@ -540,11 +979,11 @@ export function CommutePingApp() {
 
   let screen: ReactNode;
   if (state.screen === 'track') {
-    screen = <TrackScreen phase={state.phase} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} accuracy={commuteLocation.location?.accuracy ?? null} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onStart={startCommute} onEnd={endCommute} onCheckIn={() => { dispatch({ type: 'CHECK_IN', timestamp: Date.now() }); notify('Local check-in recorded · nothing was sent'); }} />;
+    screen = <TrackScreen phase={state.phase} routes={state.routes} selectedRouteId={selectedRoute?.id ?? null} displayedRoute={displayedRoute} routeCoordinates={routeTracking.routeCoordinates} routeMonitoringAvailable={routeTracking.monitoringAvailable} routeDeviation={routeTracking.deviation} timing={timing} idleStatus={idleMonitor.status} currentLocation={commuteLocation.location} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onSelectRoute={setSelectedRouteId} onStart={startCommute} onEnd={endCommute} onCheckIn={checkIn} />;
   } else if (state.screen === 'routes') {
     screen = <RoutesScreen routes={state.routes} onAdd={() => setRouteModal(true)} />;
   } else if (state.screen === 'alerts') {
-    screen = <AlertsScreen rules={state.rules} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} />;
+    screen = <AlertsScreen rules={state.rules} incidents={state.incidents} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} onResolveIncident={(id) => dispatch({ type: 'RESOLVE_INCIDENT', id, status: 'recorded' })} />;
   } else {
     screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onClearLocalData={() => setClearDataModal(true)} />;
   }
@@ -554,12 +993,13 @@ export function CommutePingApp() {
       <StatusBar style="light" />
       <View style={styles.appShell}>
         <View style={styles.content}>{screen}</View>
-        <BottomNavigation screen={state.screen} onNavigate={(next) => dispatch({ type: 'NAVIGATE', screen: next })} onSos={() => dispatch({ type: 'OPEN_SOS' })} />
+        <BottomNavigation screen={state.screen} onNavigate={(next) => dispatch({ type: 'NAVIGATE', screen: next })} onSos={openLocalSos} />
       </View>
       <SosModal visible={state.sosActive} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS demo closed · no data was sent'); }} />
+      {motionSafety.candidate && <SafetyCandidateModal key={motionSafety.candidate.detectedAt} candidate={motionSafety.candidate} onSafe={() => respondToMotionCandidate(true)} onEscalate={() => respondToMotionCandidate(false)} />}
       <AddContactModal key={contactModalKey} visible={contactModal} initialContact={contactPrefill} accessMessage={contactAccessMessage} onClose={() => setContactModal(false)} onSubmit={(contact) => { dispatch({ type: 'ADD_CONTACT', contact }); setContactModal(false); notify(`${contact.name} saved locally · no invite sent`); }} />
-      <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setRouteModal(false); notify(`${route.title} saved locally`); }} />
-      <ClearDataModal visible={clearDataModal} onCancel={() => setClearDataModal(false)} onConfirm={() => { dispatch({ type: 'RESET_PREFERENCES' }); setClearDataModal(false); notify('Local contacts, routes, and preferences cleared'); }} />
+      <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setSelectedRouteId(route.id); setRouteModal(false); notify(`${route.title} saved locally and selected`); }} />
+      <ClearDataModal visible={clearDataModal} onCancel={() => setClearDataModal(false)} onConfirm={() => { dispatch({ type: 'RESET_PREFERENCES' }); setSelectedRouteId(null); setClearDataModal(false); notify('Local contacts, routes, incidents, and preferences cleared'); }} />
       {persistedPreferences.storageError && <View accessibilityLiveRegion="polite" style={styles.storageWarning}><Text style={styles.storageWarningText}>Local changes could not be saved. Keep the app open and try again.</Text></View>}
       {toast && <View key={toast.id} accessibilityLiveRegion="polite" style={styles.toast}><AppIcon name={icons.check} size={15} color={palette.green} /><Text style={styles.toastText}>{toast.message}</Text></View>}
     </SafeAreaView>
@@ -582,6 +1022,22 @@ const styles = StyleSheet.create({
   cardTitle: { color: palette.text, fontSize: 14, fontWeight: '600' },
   cardCopy: { color: palette.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
   emptyCard: { padding: 18 },
+  routeSetupCard: { padding: 15, marginBottom: 14 },
+  routeSelector: { marginBottom: 14 },
+  routeSelectorLabel: { color: palette.mutedDark, fontSize: 9, fontWeight: '700', letterSpacing: 0.7, marginBottom: 9 },
+  routeSelectorContent: { gap: 9, paddingRight: 8 },
+  routeChoice: { width: 190, minHeight: 62, borderRadius: radius.medium, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card, paddingHorizontal: 12, paddingVertical: 10 },
+  routeChoiceSelected: { borderColor: '#5E83E9', backgroundColor: palette.blueSoft },
+  routeChoiceHeader: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  routeChoiceTitle: { color: palette.text, flex: 1, fontSize: 12, fontWeight: '600' },
+  routeChoiceTitleSelected: { color: '#D7E2FF' },
+  routeChoiceSchedule: { color: palette.muted, fontSize: 9, marginTop: 7 },
+  activeRouteMap: { height: 260, backgroundColor: '#1C1D21', borderColor: palette.line, borderRadius: radius.large, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', position: 'relative' },
+  activeRouteTitleBadge: { position: 'absolute', left: 12, right: 12, top: 12, minHeight: 32, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(18,18,21,0.92)', borderColor: palette.lineStrong, borderRadius: 9, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10 },
+  activeRouteTitle: { color: palette.text, flex: 1, fontSize: 10, fontWeight: '600' },
+  activeRouteStatusBadge: { position: 'absolute', left: 12, right: 12, bottom: 12, minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: 'rgba(18,18,21,0.94)', borderColor: palette.lineStrong, borderRadius: 9, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 7 },
+  activeRouteStatus: { color: '#D2D2D7', flex: 1, fontSize: 10, lineHeight: 14 },
+  routeStatusDot: { width: 7, height: 7, borderRadius: 4 },
   map: { height: 260, backgroundColor: '#1C1D21', borderColor: palette.line, borderRadius: radius.large, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', position: 'relative' },
   mapDot: { position: 'absolute', width: 2, height: 2, borderRadius: 1, backgroundColor: '#343945' },
   locationPulse: { position: 'absolute', left: '47%', top: '46%', width: 27, height: 27, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(57,115,246,0.35)', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(57,115,246,0.08)' },
@@ -601,6 +1057,10 @@ const styles = StyleSheet.create({
   commuteActiveButton: { backgroundColor: palette.blue },
   segmentLabel: { color: '#C1C1C7', fontSize: 13, fontWeight: '500' },
   segmentActiveLabel: { color: palette.white, fontWeight: '600' },
+  insightGrid: { marginTop: 14, flexDirection: 'row', gap: 13 },
+  insightCard: { flex: 1, minHeight: 96, padding: 14 },
+  insightValue: { color: palette.text, fontSize: 15, fontWeight: '700', marginTop: 10 },
+  insightMeta: { color: palette.muted, fontSize: 10, marginTop: 5 },
   metricGrid: { marginTop: 20, flexDirection: 'row', gap: 13 },
   metricCard: { flex: 1, minHeight: 78, padding: 14 },
   metricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
@@ -631,6 +1091,18 @@ const styles = StyleSheet.create({
   ruleCard: { minHeight: 76, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
   ruleDisabled: { opacity: 0.65 },
   ruleIcon: { width: 39, height: 39, borderRadius: 20, backgroundColor: palette.blueSoft, alignItems: 'center', justifyContent: 'center' },
+  historyHeader: { marginTop: 34, marginBottom: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  historyTitle: { color: palette.muted, fontSize: 10, fontWeight: '800', letterSpacing: 0.7 },
+  historyCount: { color: '#AFC5FF', fontSize: 10, fontWeight: '700', backgroundColor: palette.blueSoft, borderRadius: 10, minWidth: 22, textAlign: 'center', paddingVertical: 3 },
+  incidentCard: { minHeight: 104, flexDirection: 'row', alignItems: 'flex-start', gap: 11, padding: 14 },
+  incidentIcon: { width: 37, height: 37, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blueSoft },
+  incidentIconOpen: { backgroundColor: 'rgba(239,57,75,0.12)' },
+  incidentTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  incidentStatus: { color: '#AFC5FF', fontSize: 7, fontWeight: '800', letterSpacing: 0.5, borderRadius: 8, backgroundColor: palette.blueSoft, paddingHorizontal: 6, paddingVertical: 3 },
+  incidentStatusOpen: { color: '#FF939D', backgroundColor: 'rgba(239,57,75,0.12)' },
+  incidentTime: { color: palette.mutedDark, fontSize: 9, marginTop: 7 },
+  reviewButton: { alignSelf: 'flex-start', minHeight: 30, borderRadius: 9, borderColor: palette.lineStrong, borderWidth: 1, justifyContent: 'center', paddingHorizontal: 10, marginTop: 9 },
+  reviewButtonText: { color: '#C7C7CF', fontSize: 9, fontWeight: '600' },
   toggle: { width: 50, height: 29, borderRadius: radius.pill, padding: 3, backgroundColor: '#4C4C53' },
   toggleOn: { backgroundColor: palette.blue },
   toggleThumb: { width: 23, height: 23, borderRadius: 12, backgroundColor: palette.white },
@@ -666,6 +1138,18 @@ const styles = StyleSheet.create({
   cancelSosButton: { width: '90%', minHeight: 52, borderRadius: radius.pill, borderColor: '#55555C', borderWidth: 1, backgroundColor: '#17171A', alignItems: 'center', justifyContent: 'center', marginTop: 14 },
   cancelSosText: { color: palette.white, fontSize: 12, fontWeight: '700' },
   sosDisclaimer: { color: '#A86167', fontSize: 9, textAlign: 'center', marginTop: 16 },
+  candidateModal: { width: '100%', maxWidth: 390, alignItems: 'center', borderRadius: 26, borderColor: 'rgba(239,57,75,0.42)', borderWidth: 1, backgroundColor: '#18181C', padding: 24 },
+  candidateAlertIcon: { width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(239,57,75,0.13)' },
+  candidateTitle: { color: palette.text, fontSize: 22, fontWeight: '700', letterSpacing: -0.5, marginTop: 17 },
+  candidateCopy: { color: palette.muted, fontSize: 11, lineHeight: 17, textAlign: 'center', marginTop: 8 },
+  countdownCircle: { width: 98, height: 98, borderRadius: 49, alignItems: 'center', justifyContent: 'center', borderColor: palette.red, borderWidth: 4, backgroundColor: 'rgba(239,57,75,0.08)', marginVertical: 22 },
+  countdownValue: { color: palette.white, fontSize: 34, fontWeight: '800' },
+  countdownLabel: { color: '#FF9EA7', fontSize: 7, fontWeight: '800', letterSpacing: 0.9, marginTop: -2 },
+  safeButton: { width: '100%', minHeight: 50, borderRadius: 14, backgroundColor: palette.green, alignItems: 'center', justifyContent: 'center' },
+  safeButtonText: { color: '#09251B', fontSize: 12, fontWeight: '800' },
+  localSosButton: { width: '100%', minHeight: 46, borderRadius: 13, borderColor: 'rgba(239,57,75,0.45)', borderWidth: 1, alignItems: 'center', justifyContent: 'center', marginTop: 10 },
+  localSosText: { color: '#FF8B95', fontSize: 11, fontWeight: '700' },
+  candidateDisclaimer: { color: palette.mutedDark, fontSize: 9, lineHeight: 13, textAlign: 'center', marginTop: 12 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.72)', justifyContent: 'flex-end' },
   modalBackdropCentered: { flex: 1, backgroundColor: 'rgba(0,0,0,0.76)', alignItems: 'center', justifyContent: 'center', padding: 24 },
   confirmModal: { width: '100%', maxWidth: 380, backgroundColor: palette.phone, borderRadius: 24, borderColor: palette.lineStrong, borderWidth: 1, padding: 24 },

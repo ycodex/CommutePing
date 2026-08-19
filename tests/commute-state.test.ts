@@ -23,9 +23,10 @@ test('moves through the explicit commute lifecycle', () => {
   assert.equal(requesting.phase, 'starting');
   assert.equal(requesting.locationStatus, 'requesting');
 
-  const active = commuteReducer(requesting, { type: 'START_SUCCEEDED' });
+  const active = commuteReducer(requesting, { type: 'START_SUCCEEDED', timestamp: 500 });
   assert.equal(active.phase, 'active');
   assert.equal(active.locationStatus, 'live');
+  assert.equal(active.startedAt, 500);
 
   const checkedIn = commuteReducer(active, { type: 'CHECK_IN', timestamp: 1000 });
   assert.equal(checkedIn.lastCheckInAt, 1000);
@@ -34,6 +35,7 @@ test('moves through the explicit commute lifecycle', () => {
   assert.equal(ended.phase, 'idle');
   assert.equal(ended.locationStatus, 'off');
   assert.equal(ended.lastCheckInAt, 2000);
+  assert.equal(ended.startedAt, null);
 });
 
 test('fails safely when location permission is denied', () => {
@@ -41,6 +43,48 @@ test('fails safely when location permission is denied', () => {
   const denied = commuteReducer(requesting, { type: 'START_FAILED', status: 'denied' });
   assert.equal(denied.phase, 'idle');
   assert.equal(denied.locationStatus, 'denied');
+});
+
+test('keeps the selected route for the active commute and clears it when the commute ends', () => {
+  const route = {
+    id: 'route-1',
+    title: 'Office to Home',
+    schedule: 'Weekdays · 8:30 PM',
+    durationMinutes: 42,
+    learned: false,
+    origin: { label: 'MG Road, Bengaluru', latitude: 12.9756, longitude: 77.6063 },
+    destination: { label: 'Indiranagar, Bengaluru', latitude: 12.9784, longitude: 77.6408 },
+  };
+  const saved = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
+  const requesting = commuteReducer(saved, { type: 'START_REQUESTED', routeId: route.id });
+  assert.equal(requesting.activeRouteId, route.id);
+
+  const active = commuteReducer(requesting, { type: 'START_SUCCEEDED' });
+  assert.equal(active.activeRouteId, route.id);
+
+  const ended = commuteReducer(active, { type: 'END_COMMUTE', timestamp: 2_000 });
+  assert.equal(ended.activeRouteId, null);
+});
+
+test('does not activate an unknown saved route', () => {
+  const requesting = commuteReducer(initialCommuteState, { type: 'START_REQUESTED', routeId: 'missing' });
+  assert.equal(requesting.activeRouteId, null);
+});
+
+test('records and resolves a bounded local safety incident', () => {
+  const incident = {
+    id: 'incident-1',
+    kind: 'idle' as const,
+    title: 'Prolonged idle',
+    detail: 'No meaningful movement for 8 minutes.',
+    createdAt: 1_000,
+    status: 'open' as const,
+  };
+  const recorded = commuteReducer(initialCommuteState, { type: 'RECORD_INCIDENT', incident });
+  assert.deepEqual(recorded.incidents, [incident]);
+
+  const resolved = commuteReducer(recorded, { type: 'RESOLVE_INCIDENT', id: incident.id, status: 'dismissed' });
+  assert.equal(resolved.incidents[0]?.status, 'dismissed');
 });
 
 test('keeps the commute active but marks live location unavailable when updates fail', () => {

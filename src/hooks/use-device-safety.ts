@@ -5,10 +5,16 @@ import { Platform } from 'react-native';
 
 import { canSubscribeToBatteryEvents } from '@/device/battery-capabilities';
 
-type MotionReading = {
+export type MotionReading = {
   acceleration: number;
   rotation: number;
   available: boolean;
+};
+
+const inactiveMotionReading: MotionReading = {
+  acceleration: 0,
+  rotation: 0,
+  available: false,
 };
 
 export function useBatteryState() {
@@ -52,7 +58,7 @@ export function useBatteryState() {
 }
 
 export function useMotionReadings(enabled: boolean): MotionReading {
-  const [reading, setReading] = useState<MotionReading>({ acceleration: 0, rotation: 0, available: false });
+  const [reading, setReading] = useState<MotionReading>(inactiveMotionReading);
 
   useEffect(() => {
     if (!enabled) return;
@@ -77,7 +83,7 @@ export function useMotionReadings(enabled: boolean): MotionReading {
         });
       })
       .catch(() => {
-        if (mounted) setReading({ acceleration: 0, rotation: 0, available: false });
+        if (mounted) setReading(inactiveMotionReading);
       });
 
     return () => {
@@ -87,5 +93,5 @@ export function useMotionReadings(enabled: boolean): MotionReading {
     };
   }, [enabled]);
 
-  return enabled ? reading : { acceleration: 0, rotation: 0, available: false };
+  return enabled ? reading : inactiveMotionReading;
 }

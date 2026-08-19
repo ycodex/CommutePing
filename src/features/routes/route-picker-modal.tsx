@@ -24,13 +24,19 @@ import { RouteMap } from './route-map';
 type RouteStop = 'origin' | 'destination';
 type IconName = SymbolViewProps['name'];
 
-const pickerIcons: Record<'back' | 'search' | 'current' | 'route' | 'save', IconName> = {
+const pickerIcons: Record<'back' | 'search' | 'current' | 'route' | 'save' | 'swap' | 'pin' | 'clock', IconName> = {
   back: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
   search: { ios: 'magnifyingglass', android: 'search', web: 'search' },
   current: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
   route: { ios: 'point.topleft.down.to.point.bottomright.curvepath', android: 'route', web: 'route' },
   save: { ios: 'checkmark', android: 'check', web: 'check' },
+  swap: { ios: 'arrow.up.arrow.down', android: 'swap_vert', web: 'swap_vert' },
+  pin: { ios: 'mappin.and.ellipse', android: 'location_on', web: 'location_on' },
+  clock: { ios: 'clock.fill', android: 'schedule', web: 'schedule' },
 };
+
+const schedulePresets = ['Weekdays · 8:30 AM', 'Weekdays · 6:30 PM', 'Daily · Flexible'];
+const durationPresets = [20, 30, 45, 60];
 
 export function RoutePickerModal({
   visible,
@@ -46,9 +52,11 @@ export function RoutePickerModal({
   const [destination, setDestination] = useState<RoutePoint | null>(null);
   const [query, setQuery] = useState('');
   const [title, setTitle] = useState('');
+  const [titleCustomized, setTitleCustomized] = useState(false);
   const [schedule, setSchedule] = useState('');
   const [duration, setDuration] = useState('');
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<RoutePoint[]>([]);
 
   const focusedPoint = activeStop === 'origin' ? origin : destination;
   const routeReady = Boolean(origin && destination);
@@ -59,9 +67,11 @@ export function RoutePickerModal({
     setDestination(null);
     setQuery('');
     setTitle('');
+    setTitleCustomized(false);
     setSchedule('');
     setDuration('');
     setBusyLabel(null);
+    setSearchResults([]);
   };
 
   const close = () => {
@@ -78,10 +88,30 @@ export function RoutePickerModal({
     } else {
       setDestination(point);
     }
-    if (!title && nextOrigin && nextDestination) {
+    if (!titleCustomized && nextOrigin && nextDestination) {
       setTitle(`${shortLabel(nextOrigin.label)} to ${shortLabel(nextDestination.label)}`);
     }
     setQuery('');
+    setSearchResults([]);
+  };
+
+  const focusStop = (stop: RouteStop) => {
+    setActiveStop(stop);
+    setQuery('');
+    setSearchResults([]);
+  };
+
+  const swapStops = () => {
+    const nextOrigin = destination;
+    const nextDestination = origin;
+    setOrigin(nextOrigin);
+    setDestination(nextDestination);
+    setActiveStop(nextOrigin ? 'destination' : 'origin');
+    setQuery('');
+    setSearchResults([]);
+    if (!titleCustomized && nextOrigin && nextDestination) {
+      setTitle(`${shortLabel(nextOrigin.label)} to ${shortLabel(nextDestination.label)}`);
+    }
   };
 
   const search = async () => {
@@ -103,13 +133,18 @@ export function RoutePickerModal({
         return;
       }
       const results = await Location.geocodeAsync(cleanQuery);
-      const result = results[0];
-      if (!result) {
+      if (results.length === 0) {
         Alert.alert('Place not found', 'Try adding the city, state, or a nearby landmark.');
         return;
       }
-      const label = await resolveLabel(result, cleanQuery);
-      savePoint({ label, latitude: result.latitude, longitude: result.longitude });
+      const choices = await Promise.all(results.slice(0, 5).map(async (result, index) => ({
+        label: await resolveLabel(result, index === 0 ? cleanQuery : `${cleanQuery} · result ${index + 1}`),
+        latitude: result.latitude,
+        longitude: result.longitude,
+      })));
+      setSearchResults(choices.filter((choice, index, values) => (
+        values.findIndex((other) => other.latitude === choice.latitude && other.longitude === choice.longitude) === index
+      )));
     } catch {
       Alert.alert('Search unavailable', 'The device could not search for that place. Check the internet connection and try again.');
     } finally {
@@ -174,6 +209,13 @@ export function RoutePickerModal({
       learned: false,
       origin,
       destination,
+      geometry: {
+        source: 'preview',
+        coordinates: [
+          { latitude: origin.latitude, longitude: origin.longitude },
+          { latitude: destination.latitude, longitude: destination.longitude },
+        ],
+      },
     });
     resetForm();
   };
@@ -193,15 +235,19 @@ export function RoutePickerModal({
                 <AppIcon name={pickerIcons.back} size={19} color={palette.text} />
               </Pressable>
               <View style={styles.headerCopy}>
-                <Text accessibilityRole="header" style={styles.title}>Plan a route</Text>
-                <Text style={styles.subtitle}>Search or tap the map to choose each point</Text>
+                <Text accessibilityRole="header" style={styles.title}>Add a regular commute</Text>
+                <Text style={styles.subtitle}>Choose both places, then add the usual timing</Text>
               </View>
             </View>
 
-            <View style={styles.stopSelector}>
-              <StopButton label="Start" point={origin} active={activeStop === 'origin'} color={palette.green} onPress={() => setActiveStop('origin')} />
+            <View style={styles.placesCard}>
+              <Text style={styles.stepLabel}>1 · CHOOSE PLACES</Text>
+              <StopButton label="Starting from" point={origin} active={activeStop === 'origin'} color={palette.green} onPress={() => focusStop('origin')} />
               <View style={styles.stopConnector} />
-              <StopButton label="Destination" point={destination} active={activeStop === 'destination'} color={palette.red} onPress={() => setActiveStop('destination')} />
+              <StopButton label="Going to" point={destination} active={activeStop === 'destination'} color={palette.red} onPress={() => focusStop('destination')} />
+              <Pressable accessibilityLabel="Swap start and destination" accessibilityRole="button" onPress={swapStops} style={styles.swapButton}>
+                <AppIcon name={pickerIcons.swap} size={18} color={palette.text} />
+              </Pressable>
             </View>
 
             <View style={styles.searchRow}>
@@ -214,7 +260,7 @@ export function RoutePickerModal({
                   maxLength={160}
                   onChangeText={setQuery}
                   onSubmitEditing={search}
-                  placeholder={`Search ${activeStop === 'origin' ? 'start' : 'destination'}`}
+                  placeholder={`Search ${activeStop === 'origin' ? 'starting place' : 'destination'}`}
                   placeholderTextColor={palette.mutedDark}
                   returnKeyType="search"
                   style={styles.searchInput}
@@ -222,16 +268,38 @@ export function RoutePickerModal({
                 />
               </View>
               <Pressable accessibilityLabel="Search place" accessibilityRole="button" disabled={Boolean(busyLabel)} onPress={search} style={styles.searchButton}>
-                <Text style={styles.searchButtonText}>Search</Text>
+                <AppIcon name={pickerIcons.search} size={18} color={palette.white} />
               </Pressable>
             </View>
 
+            <Pressable accessibilityRole="button" disabled={Boolean(busyLabel)} onPress={useCurrentLocation} style={styles.currentLocationButton}>
+              <AppIcon name={pickerIcons.current} size={16} color="#AFC5FF" />
+              <Text style={styles.currentLocationText}>Use current location for {activeStop === 'origin' ? 'start' : 'destination'}</Text>
+            </Pressable>
+
+            {searchResults.length > 0 && (
+              <View style={styles.resultsCard}>
+                <Text style={styles.resultsTitle}>Choose a search result</Text>
+                {searchResults.map((result, index) => (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={`${result.latitude}-${result.longitude}`}
+                    onPress={() => savePoint(result)}
+                    style={[styles.resultRow, index === searchResults.length - 1 && styles.resultRowLast]}
+                  >
+                    <View style={styles.resultIcon}><AppIcon name={pickerIcons.pin} size={15} color="#AFC5FF" /></View>
+                    <View style={styles.flexOne}>
+                      <Text numberOfLines={2} style={styles.resultLabel}>{result.label}</Text>
+                      <Text style={styles.resultCoordinates}>{result.latitude.toFixed(4)}, {result.longitude.toFixed(4)}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+
             <View style={styles.mapCard}>
               <RouteMap origin={origin} destination={destination} focusedPoint={focusedPoint} onSelect={selectFromMap} />
-              <Pressable accessibilityRole="button" disabled={Boolean(busyLabel)} onPress={useCurrentLocation} style={styles.currentButton}>
-                <AppIcon name={pickerIcons.current} size={16} color={palette.text} />
-                <Text style={styles.currentButtonText}>Use my location</Text>
-              </Pressable>
+              <View style={styles.mapModeBadge}><View style={[styles.stopDot, { backgroundColor: activeStop === 'origin' ? palette.green : palette.red }]} /><Text style={styles.mapModeText}>Tap map to set {activeStop === 'origin' ? 'start' : 'destination'}</Text></View>
               {busyLabel && (
                 <View accessibilityLiveRegion="polite" style={styles.busyOverlay}>
                   <ActivityIndicator color={palette.white} />
@@ -239,21 +307,54 @@ export function RoutePickerModal({
                 </View>
               )}
             </View>
-            <Text style={styles.mapHint}>Selecting a point updates the highlighted {activeStop}. The blue line is a preview, not turn-by-turn directions.</Text>
+            <Text style={styles.mapHint}>The highlighted stop is updated by search or a map tap. The blue line is an endpoint preview until road routing is connected.</Text>
 
             <View style={styles.formCard}>
               <View style={styles.formHeading}>
-                <AppIcon name={pickerIcons.route} size={18} color="#78A0FF" />
-                <Text style={styles.formTitle}>Route details</Text>
+                <AppIcon name={pickerIcons.clock} size={18} color="#78A0FF" />
+                <View>
+                  <Text style={styles.stepLabel}>2 · ADD THE ROUTINE</Text>
+                  <Text style={styles.formTitle}>When do you usually travel?</Text>
+                </View>
               </View>
-              <TextInput accessibilityLabel="Route name" value={title} onChangeText={setTitle} placeholder="Work to Home" placeholderTextColor={palette.mutedDark} style={styles.input} autoCapitalize="words" maxLength={100} />
-              <TextInput accessibilityLabel="Expected schedule" value={schedule} onChangeText={setSchedule} placeholder="Weekdays · 8:30 PM" placeholderTextColor={palette.mutedDark} style={styles.input} maxLength={100} />
-              <TextInput accessibilityLabel="Expected duration in minutes" value={duration} onChangeText={setDuration} placeholder="45 minutes" placeholderTextColor={palette.mutedDark} style={styles.input} keyboardType="number-pad" maxLength={3} />
+              <Text style={styles.fieldLabel}>ROUTE NAME</Text>
+              <TextInput accessibilityLabel="Route name" value={title} onChangeText={(value) => { setTitle(value); setTitleCustomized(true); }} placeholder="Office to Home" placeholderTextColor={palette.mutedDark} style={styles.input} autoCapitalize="words" maxLength={100} />
+
+              <Text style={styles.fieldLabel}>USUAL SCHEDULE</Text>
+              <View style={styles.presetWrap}>
+                {schedulePresets.map((preset) => (
+                  <Pressable accessibilityRole="button" key={preset} onPress={() => setSchedule(preset)} style={[styles.presetChip, schedule === preset && styles.presetChipSelected]}>
+                    <Text style={[styles.presetText, schedule === preset && styles.presetTextSelected]}>{preset}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <TextInput accessibilityLabel="Expected schedule" value={schedule} onChangeText={setSchedule} placeholder="Or enter a custom schedule" placeholderTextColor={palette.mutedDark} style={styles.input} maxLength={100} />
+
+              <Text style={styles.fieldLabel}>USUAL DURATION</Text>
+              <View style={styles.durationRow}>
+                {durationPresets.map((minutes) => (
+                  <Pressable accessibilityRole="button" key={minutes} onPress={() => setDuration(`${minutes}`)} style={[styles.durationChip, duration === `${minutes}` && styles.presetChipSelected]}>
+                    <Text style={[styles.presetText, duration === `${minutes}` && styles.presetTextSelected]}>{minutes} min</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <TextInput accessibilityLabel="Expected duration in minutes" value={duration} onChangeText={setDuration} placeholder="Custom minutes" placeholderTextColor={palette.mutedDark} style={styles.input} keyboardType="number-pad" maxLength={3} />
             </View>
+
+            {routeReady && (
+              <View style={styles.summaryCard}>
+                <View style={styles.summaryIcon}><AppIcon name={pickerIcons.route} size={18} color={palette.green} /></View>
+                <View style={styles.flexOne}>
+                  <Text style={styles.summaryTitle}>{title.trim() || 'New planned route'}</Text>
+                  <Text numberOfLines={2} style={styles.summaryCopy}>{shortLabel(origin?.label ?? '')} → {shortLabel(destination?.label ?? '')}</Text>
+                  <Text style={styles.summaryMeta}>{schedule || 'Schedule needed'} · {duration ? `${duration} min` : 'Duration needed'}</Text>
+                </View>
+              </View>
+            )}
 
             <Pressable accessibilityRole="button" disabled={!routeReady || Boolean(busyLabel)} onPress={submit} style={[styles.saveButton, (!routeReady || busyLabel) && styles.saveButtonDisabled]}>
               <AppIcon name={pickerIcons.save} size={17} color={palette.white} />
-              <Text style={styles.saveButtonText}>Save Planned Route</Text>
+              <Text style={styles.saveButtonText}>Save Route & Use for Commutes</Text>
             </Pressable>
             <Text style={styles.privacyCopy}>Searches are handled by the device location service. Saved route points remain on this device in the current build.</Text>
           </ScrollView>
@@ -323,36 +424,60 @@ function shortLabel(label: string): string {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.phone },
   flex: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 34 },
+  flexOne: { flex: 1 },
+  content: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 38 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 13, marginBottom: 22 },
   iconButton: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.card, borderColor: palette.line, borderWidth: 1 },
   headerCopy: { flex: 1 },
   title: { color: palette.text, fontSize: 23, fontWeight: '700', letterSpacing: -0.6 },
   subtitle: { color: palette.muted, fontSize: 11, marginTop: 3 },
-  stopSelector: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
-  stopButton: { flex: 1, minWidth: 0, minHeight: 64, borderRadius: radius.medium, backgroundColor: palette.card, borderColor: palette.line, borderWidth: 1, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 9 },
+  placesCard: { position: 'relative', borderRadius: radius.large, backgroundColor: palette.card, borderColor: palette.line, borderWidth: 1, padding: 14, marginBottom: 12 },
+  stepLabel: { color: '#8CA9F5', fontSize: 9, fontWeight: '800', letterSpacing: 0.8, marginBottom: 11 },
+  stopButton: { width: '100%', minHeight: 64, borderRadius: radius.medium, backgroundColor: '#111114', borderColor: palette.line, borderWidth: 1, paddingLeft: 12, paddingRight: 52, flexDirection: 'row', alignItems: 'center', gap: 10 },
   stopButtonActive: { borderColor: '#5E83E9', backgroundColor: palette.blueSoft },
-  stopConnector: { width: 14, height: 1, backgroundColor: palette.lineStrong },
+  stopConnector: { width: 2, height: 12, marginLeft: 18, backgroundColor: palette.lineStrong },
   stopDot: { width: 10, height: 10, borderRadius: 5 },
   stopCopy: { flex: 1, minWidth: 0 },
   stopLabel: { color: palette.muted, fontSize: 10, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
   stopLabelActive: { color: '#AFC5FF' },
   stopValue: { color: palette.text, fontSize: 11, marginTop: 5 },
+  swapButton: { position: 'absolute', right: 26, top: 101, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: '#292A30', borderColor: palette.lineStrong, borderWidth: 1 },
   searchRow: { flexDirection: 'row', gap: 9, marginBottom: 12 },
   searchInputWrap: { flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 13, borderRadius: 13, borderColor: palette.line, borderWidth: 1, backgroundColor: '#111114' },
   searchInput: { flex: 1, color: palette.text, fontSize: 13, paddingVertical: 12 },
-  searchButton: { minWidth: 72, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blue },
-  searchButtonText: { color: palette.white, fontSize: 12, fontWeight: '700' },
-  mapCard: { height: 300, overflow: 'hidden', borderRadius: radius.large, borderColor: palette.lineStrong, borderWidth: 1, backgroundColor: '#111114' },
-  currentButton: { position: 'absolute', right: 11, top: 11, minHeight: 38, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 11, backgroundColor: 'rgba(18,18,21,0.94)', borderColor: palette.lineStrong, borderWidth: 1 },
-  currentButtonText: { color: palette.text, fontSize: 10, fontWeight: '600' },
+  searchButton: { width: 50, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blue },
+  currentLocationButton: { minHeight: 43, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderRadius: 12, borderColor: 'rgba(94,131,233,0.35)', borderWidth: 1, backgroundColor: palette.blueSoft, marginBottom: 12 },
+  currentLocationText: { color: '#B8CAFA', fontSize: 11, fontWeight: '600' },
+  resultsCard: { borderRadius: radius.medium, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card, paddingHorizontal: 13, marginBottom: 12 },
+  resultsTitle: { color: palette.muted, fontSize: 9, fontWeight: '700', letterSpacing: 0.5, paddingTop: 12, paddingBottom: 5 },
+  resultRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: palette.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  resultRowLast: { borderBottomWidth: 0 },
+  resultIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blueSoft },
+  resultLabel: { color: palette.text, fontSize: 11, lineHeight: 15 },
+  resultCoordinates: { color: palette.mutedDark, fontSize: 9, marginTop: 3 },
+  mapCard: { height: 260, overflow: 'hidden', borderRadius: radius.large, borderColor: palette.lineStrong, borderWidth: 1, backgroundColor: '#111114' },
+  mapModeBadge: { position: 'absolute', left: 11, top: 11, minHeight: 36, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 7, borderRadius: 11, backgroundColor: 'rgba(18,18,21,0.94)', borderColor: palette.lineStrong, borderWidth: 1 },
+  mapModeText: { color: palette.text, fontSize: 10, fontWeight: '600' },
   busyOverlay: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(11,11,14,0.72)' },
   busyText: { color: palette.text, fontSize: 11, fontWeight: '600' },
   mapHint: { color: palette.mutedDark, fontSize: 10, lineHeight: 15, marginTop: 9, paddingHorizontal: 3 },
-  formCard: { marginTop: 20, padding: 16, borderRadius: radius.medium, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card },
-  formHeading: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
+  formCard: { marginTop: 20, padding: 16, borderRadius: radius.large, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card },
+  formHeading: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, marginBottom: 3 },
   formTitle: { color: palette.text, fontSize: 14, fontWeight: '700' },
-  input: { minHeight: 47, borderRadius: 11, borderColor: palette.line, borderWidth: 1, backgroundColor: '#111114', color: palette.text, fontSize: 13, paddingHorizontal: 13, marginTop: 11 },
+  fieldLabel: { color: palette.mutedDark, fontSize: 9, fontWeight: '700', letterSpacing: 0.6, marginTop: 18 },
+  input: { minHeight: 47, borderRadius: 11, borderColor: palette.line, borderWidth: 1, backgroundColor: '#111114', color: palette.text, fontSize: 13, paddingHorizontal: 13, marginTop: 8 },
+  presetWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 9 },
+  presetChip: { minHeight: 34, borderRadius: 17, borderColor: palette.lineStrong, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 11, backgroundColor: '#161619' },
+  presetChipSelected: { borderColor: '#5E83E9', backgroundColor: palette.blueSoft },
+  presetText: { color: palette.muted, fontSize: 10, fontWeight: '600' },
+  presetTextSelected: { color: '#C7D6FF' },
+  durationRow: { flexDirection: 'row', gap: 7, marginTop: 9 },
+  durationChip: { minHeight: 36, flex: 1, borderRadius: 12, borderColor: palette.lineStrong, borderWidth: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#161619' },
+  summaryCard: { minHeight: 86, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: radius.medium, borderColor: 'rgba(69,201,148,0.28)', borderWidth: 1, backgroundColor: palette.greenSoft, padding: 14, marginTop: 14 },
+  summaryIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(69,201,148,0.14)' },
+  summaryTitle: { color: palette.text, fontSize: 13, fontWeight: '700' },
+  summaryCopy: { color: '#B9C8C1', fontSize: 10, lineHeight: 14, marginTop: 4 },
+  summaryMeta: { color: palette.green, fontSize: 9, fontWeight: '600', marginTop: 5 },
   saveButton: { minHeight: 52, borderRadius: 14, backgroundColor: palette.blue, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 17 },
   saveButtonDisabled: { opacity: 0.42 },
   saveButtonText: { color: palette.white, fontSize: 13, fontWeight: '700' },

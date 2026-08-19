@@ -7,6 +7,15 @@ import { decodeCommutePreferences, encodeCommutePreferences } from '../src/stora
 const preferences = {
   rules: { connectivity: true, battery: false, idle: true, calls: false },
   sensors: { snatch: true, fall: false },
+  incidents: [{
+    id: 'incident-1',
+    kind: 'late' as const,
+    title: 'Late arrival',
+    detail: 'Expected arrival passed by 10 minutes.',
+    createdAt: 1_000,
+    status: 'recorded' as const,
+    routeId: 'route-1',
+  }],
   contacts: [{ id: 'contact-1', name: 'Meera', relation: 'Roommate', phone: '+91 90000 00003', status: 'local' as const }],
   routes: [{
     id: 'route-1',
@@ -16,6 +25,13 @@ const preferences = {
     learned: false,
     origin: { label: 'MG Road, Bengaluru', latitude: 12.9756, longitude: 77.6063 },
     destination: { label: 'Indiranagar, Bengaluru', latitude: 12.9784, longitude: 77.6408 },
+    geometry: {
+      source: 'preview' as const,
+      coordinates: [
+        { latitude: 12.9756, longitude: 77.6063 },
+        { latitude: 12.9784, longitude: 77.6408 },
+      ],
+    },
   }],
 };
 
@@ -41,6 +57,13 @@ test('rejects malformed or unsupported stored preferences', () => {
       routes: [{ ...preferences.routes[0], origin: { label: 'Invalid', latitude: 190, longitude: 77 } }],
     },
   })), null);
+  assert.equal(decodeCommutePreferences(JSON.stringify({
+    version: 1,
+    preferences: {
+      ...preferences,
+      routes: [{ ...preferences.routes[0], geometry: { source: 'road', coordinates: [{ latitude: 12.9, longitude: 77.6 }] } }],
+    },
+  })), null);
 });
 
 test('keeps routes saved by older builds without map points', () => {
@@ -49,4 +72,12 @@ test('keeps routes saved by older builds without map points', () => {
     routes: [{ id: 'legacy-route', title: 'College to Home', schedule: 'Weekdays · 5:00 PM', durationMinutes: 35, learned: false }],
   };
   assert.deepEqual(decodeCommutePreferences(encodeCommutePreferences(legacyPreferences)), legacyPreferences);
+});
+
+test('migrates stored preferences that predate incident history', () => {
+  const { incidents: _incidents, ...olderPreferences } = preferences;
+  assert.deepEqual(
+    decodeCommutePreferences(encodeCommutePreferences(olderPreferences as typeof preferences)),
+    { ...olderPreferences, incidents: [] },
+  );
 });

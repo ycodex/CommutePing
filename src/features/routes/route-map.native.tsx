@@ -50,7 +50,7 @@ export function RouteMap({ origin, destination, focusedPoint, onSelect }: RouteM
       initialRegion={regionFor(focusedPoint)}
       onPress={handlePress}
       ref={mapRef}
-      style={{ height: 300, width: '100%' }}
+      style={{ height: 260, width: '100%' }}
       userInterfaceStyle="dark"
     >
       {origin && (
