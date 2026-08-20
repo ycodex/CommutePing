@@ -1,105 +1,130 @@
-import { useEffect, useRef } from 'react';
-import { Platform, StyleSheet, Text, View } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type MapPressEvent, type Region } from 'react-native-maps';
+import {
+  Camera,
+  type CameraRef,
+  GeoJSONSource,
+  Layer,
+  Map,
+  type PressEvent,
+  type PressEventWithFeatures,
+  ViewAnnotation,
+} from '@maplibre/maplibre-react-native';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { type NativeSyntheticEvent, StyleSheet, View } from 'react-native';
 
 import { palette } from '@/constants/commute-theme';
-import { isGoogleMapsConfigured } from '@/device/maps-config';
-import type { RoutePoint } from '@/domain/commute';
+import { getMapStyleUrl } from '@/device/open-map-config';
+import type { RouteCoordinate, RoutePoint } from '@/domain/commute';
 import type { RouteMapProps } from './route-map';
 
-const bengaluruRegion: Region = {
-  latitude: 12.9716,
-  longitude: 77.5946,
-  latitudeDelta: 0.15,
-  longitudeDelta: 0.15,
-};
+const bengaluruCenter: [number, number] = [77.5946, 12.9716];
 
-const darkMapStyle = [
-  { elementType: 'geometry', stylers: [{ color: '#1d1d20' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#a4a4ad' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#1d1d20' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#34343a' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#29292e' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#101b29' }] },
-  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#24262a' }] },
-];
+export function RouteMap({ origin, destination, focusedPoint, routeCoordinates, onSelect }: RouteMapProps) {
+  const cameraRef = useRef<CameraRef>(null);
+  const visibleCoordinates = useMemo(
+    () => routeCoordinates.length >= 2
+      ? routeCoordinates
+      : [origin, destination].filter((point): point is RoutePoint => Boolean(point)),
+    [destination, origin, routeCoordinates],
+  );
+  const routeData = useMemo(() => lineFeature(visibleCoordinates), [visibleCoordinates]);
 
-function regionFor(point: RoutePoint | null): Region {
-  if (!point) return bengaluruRegion;
+  const fitMap = useCallback(() => {
+    if (visibleCoordinates.length >= 2) {
+      cameraRef.current?.fitBounds(boundsFor(visibleCoordinates), {
+        padding: { top: 54, right: 44, bottom: 54, left: 44 },
+        duration: 360,
+        easing: 'ease',
+      });
+      return;
+    }
+    const point = focusedPoint ?? visibleCoordinates[0];
+    if (point) {
+      cameraRef.current?.easeTo({
+        center: [point.longitude, point.latitude],
+        zoom: 14,
+        duration: 300,
+        easing: 'ease',
+      });
+    }
+  }, [focusedPoint, visibleCoordinates]);
+
+  useEffect(() => {
+    fitMap();
+  }, [fitMap]);
+
+  const handlePress = (event: NativeSyntheticEvent<PressEvent> | NativeSyntheticEvent<PressEventWithFeatures>) => {
+    const [longitude, latitude] = event.nativeEvent.lngLat;
+    onSelect({ latitude, longitude });
+  };
+
+  return (
+    <Map
+      accessibilityLabel="Select route location on OpenStreetMap"
+      attribution
+      mapStyle={getMapStyleUrl()}
+      onDidFinishLoadingMap={fitMap}
+      onPress={handlePress}
+      style={styles.map}
+    >
+      <Camera ref={cameraRef} initialViewState={{ center: bengaluruCenter, zoom: 11 }} />
+      {routeData && (
+        <GeoJSONSource data={routeData} id="route-picker-line-source">
+          <Layer
+            id="route-picker-line"
+            type="line"
+            layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+            paint={{ 'line-color': palette.blue, 'line-opacity': 0.92, 'line-width': 5 }}
+          />
+        </GeoJSONSource>
+      )}
+      {origin && <MapPin id="route-origin" point={origin} color={palette.green} />}
+      {destination && <MapPin id="route-destination" point={destination} color={palette.red} />}
+    </Map>
+  );
+}
+
+function MapPin({ id, point, color }: { id: string; point: RoutePoint; color: string }) {
+  return (
+    <ViewAnnotation id={id} lngLat={[point.longitude, point.latitude]} title={point.label}>
+      <View style={[styles.pin, { backgroundColor: color }]} />
+    </ViewAnnotation>
+  );
+}
+
+function lineFeature(coordinates: RouteCoordinate[]) {
+  if (coordinates.length < 2) return null;
   return {
-    latitude: point.latitude,
-    longitude: point.longitude,
-    latitudeDelta: 0.035,
-    longitudeDelta: 0.035,
+    type: 'Feature' as const,
+    properties: {},
+    geometry: {
+      type: 'LineString' as const,
+      coordinates: coordinates.map((coordinate) => [coordinate.longitude, coordinate.latitude]),
+    },
   };
 }
 
-export function RouteMap({ origin, destination, focusedPoint, onSelect }: RouteMapProps) {
-  const mapRef = useRef<MapView>(null);
-  const googleMapsConfigured = isGoogleMapsConfigured();
-  const googleMapsReady = Platform.OS !== 'android' || googleMapsConfigured;
-
-  useEffect(() => {
-    if (focusedPoint) mapRef.current?.animateToRegion(regionFor(focusedPoint), 320);
-  }, [focusedPoint]);
-
-  const handlePress = (event: MapPressEvent) => {
-    onSelect(event.nativeEvent.coordinate);
-  };
-
-  if (!googleMapsReady) {
-    return (
-      <View accessibilityLabel="Google Maps setup required" style={styles.unavailableMap}>
-        <Text style={styles.unavailableTitle}>Google Maps setup required</Text>
-        <Text style={styles.unavailableCopy}>Search and current-location selection still work. Add a restricted Maps SDK for Android key and create a new APK to enable map taps.</Text>
-      </View>
-    );
-  }
-
-  return (
-    <MapView
-      accessibilityLabel="Select route location on map"
-      customMapStyle={darkMapStyle}
-      initialRegion={regionFor(focusedPoint)}
-      onPress={handlePress}
-      provider={googleMapsConfigured ? PROVIDER_GOOGLE : undefined}
-      ref={mapRef}
-      style={{ height: 260, width: '100%' }}
-      userInterfaceStyle="dark"
-    >
-      {origin && (
-        <Marker
-          coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-          description={origin.label}
-          pinColor={palette.green}
-          title="Start"
-        />
-      )}
-      {destination && (
-        <Marker
-          coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-          description={destination.label}
-          pinColor={palette.red}
-          title="Destination"
-        />
-      )}
-      {origin && destination && (
-        <Polyline
-          coordinates={[
-            { latitude: origin.latitude, longitude: origin.longitude },
-            { latitude: destination.latitude, longitude: destination.longitude },
-          ]}
-          lineCap="round"
-          strokeColor={palette.blue}
-          strokeWidth={4}
-        />
-      )}
-    </MapView>
+function boundsFor(coordinates: RouteCoordinate[]): [number, number, number, number] {
+  return coordinates.reduce<[number, number, number, number]>(
+    (bounds, coordinate) => [
+      Math.min(bounds[0], coordinate.longitude),
+      Math.min(bounds[1], coordinate.latitude),
+      Math.max(bounds[2], coordinate.longitude),
+      Math.max(bounds[3], coordinate.latitude),
+    ],
+    [coordinates[0].longitude, coordinates[0].latitude, coordinates[0].longitude, coordinates[0].latitude],
   );
 }
 
 const styles = StyleSheet.create({
-  unavailableMap: { height: 260, alignItems: 'center', justifyContent: 'center', backgroundColor: '#111114', paddingHorizontal: 30 },
-  unavailableTitle: { color: palette.text, fontSize: 14, fontWeight: '700', textAlign: 'center' },
-  unavailableCopy: { color: palette.muted, fontSize: 10, lineHeight: 16, textAlign: 'center', marginTop: 8 },
+  map: { height: 260, width: '100%' },
+  pin: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderColor: '#F4F6FA',
+    borderWidth: 3,
+    shadowColor: '#000000',
+    shadowOpacity: 0.28,
+    shadowRadius: 4,
+  },
 });

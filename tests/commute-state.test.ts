@@ -137,6 +137,28 @@ test('saves a user-entered route once', () => {
   assert.equal(savedAgain.routes.length, saved.routes.length);
 });
 
+test('upgrades a saved route with validated road geometry', () => {
+  const route = {
+    id: 'route-1',
+    title: 'Office to Home',
+    schedule: 'Weekdays',
+    durationMinutes: 42,
+    learned: false,
+  };
+  const geometry = {
+    source: 'road' as const,
+    coordinates: [
+      { latitude: 12.9756, longitude: 77.6063 },
+      { latitude: 12.9784, longitude: 77.6408 },
+    ],
+    distanceMeters: 4_200,
+  };
+  const saved = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
+  const upgraded = commuteReducer(saved, { type: 'UPDATE_ROUTE_GEOMETRY', id: route.id, geometry });
+
+  assert.deepEqual(upgraded.routes[0]?.geometry, geometry);
+});
+
 test('deduplicates trusted contacts by phone number', () => {
   const added = commuteReducer(initialCommuteState, {
     type: 'ADD_CONTACT',

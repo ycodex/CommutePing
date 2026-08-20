@@ -12,22 +12,17 @@ concurrency:
 
 jobs:
   build:
-    name: Sync Maps key and trigger EAS build
+    name: Trigger MapLibre Android preview build
     runs-on: ubuntu-latest
     environment: google_map_api_key
     timeout-minutes: 30
     env:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-      GOOGLE_MAPS_ANDROID_API_KEY: ${{ secrets.GOOGLE_MAP_API_KEY }}
 
     steps:
       - name: Check required secrets
         shell: bash
         run: |
-          if [[ -z "$GOOGLE_MAPS_ANDROID_API_KEY" ]]; then
-            echo "::error::Missing repository secret GOOGLE_MAP_API_KEY."
-            exit 1
-          fi
           if [[ -z "$EXPO_TOKEN" ]]; then
             echo "::error::Missing repository secret EXPO_TOKEN."
             exit 1
@@ -46,17 +41,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Sync Google Maps key to EAS preview
-        shell: bash
-        run: >-
-          npx --yes eas-cli@22.0.0 env:set
-          --name GOOGLE_MAPS_ANDROID_API_KEY
-          --value "$GOOGLE_MAPS_ANDROID_API_KEY"
-          --environment preview
-          --visibility sensitive
-          --scope project
-          --non-interactive
 
       - name: Trigger Android preview APK build
         run: >-

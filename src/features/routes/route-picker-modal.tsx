@@ -1,6 +1,6 @@
 import * as Location from 'expo-location';
 import type { SymbolViewProps } from 'expo-symbols';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,7 +18,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppIcon } from '@/components/app-icon';
 import { palette, radius } from '@/constants/commute-theme';
-import type { RoutePoint, SavedRoute } from '@/domain/commute';
+import { fetchRoadRoute } from '@/device/road-routing';
+import type { RouteGeometry, RoutePoint, SavedRoute } from '@/domain/commute';
 import { RouteMap } from './route-map';
 
 type RouteStop = 'origin' | 'destination';
@@ -57,9 +58,14 @@ export function RoutePickerModal({
   const [duration, setDuration] = useState('');
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<RoutePoint[]>([]);
+  const [routeGeometry, setRouteGeometry] = useState<RouteGeometry | null>(null);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const routeRequestRef = useRef(0);
 
   const focusedPoint = activeStop === 'origin' ? origin : destination;
   const routeReady = Boolean(origin && destination);
+  const roadRouteReady = routeGeometry?.source === 'road';
 
   const resetForm = () => {
     setActiveStop('origin');
@@ -72,11 +78,35 @@ export function RoutePickerModal({
     setDuration('');
     setBusyLabel(null);
     setSearchResults([]);
+    setRouteGeometry(null);
+    setRouteBusy(false);
+    setRouteError(null);
+    routeRequestRef.current += 1;
   };
 
   const close = () => {
     resetForm();
     onClose();
+  };
+
+  const refreshRoadRoute = async (nextOrigin: RoutePoint, nextDestination: RoutePoint): Promise<RouteGeometry | null> => {
+    const requestId = routeRequestRef.current + 1;
+    routeRequestRef.current = requestId;
+    setRouteBusy(true);
+    setRouteError(null);
+    setRouteGeometry(null);
+    try {
+      const geometry = await fetchRoadRoute(nextOrigin, nextDestination);
+      if (routeRequestRef.current !== requestId) return null;
+      setRouteGeometry(geometry);
+      return geometry;
+    } catch {
+      if (routeRequestRef.current !== requestId) return null;
+      setRouteError('A road route could not be loaded. Check the connection and retry before saving.');
+      return null;
+    } finally {
+      if (routeRequestRef.current === requestId) setRouteBusy(false);
+    }
   };
 
   const savePoint = (point: RoutePoint) => {
@@ -93,6 +123,13 @@ export function RoutePickerModal({
     }
     setQuery('');
     setSearchResults([]);
+    if (nextOrigin && nextDestination) {
+      void refreshRoadRoute(nextOrigin, nextDestination);
+    } else {
+      routeRequestRef.current += 1;
+      setRouteGeometry(null);
+      setRouteError(null);
+    }
   };
 
   const focusStop = (stop: RouteStop) => {
@@ -109,8 +146,16 @@ export function RoutePickerModal({
     setActiveStop(nextOrigin ? 'destination' : 'origin');
     setQuery('');
     setSearchResults([]);
+    setRouteGeometry(null);
+    setRouteError(null);
     if (!titleCustomized && nextOrigin && nextDestination) {
       setTitle(`${shortLabel(nextOrigin.label)} to ${shortLabel(nextDestination.label)}`);
+    }
+    if (nextOrigin && nextDestination) {
+      void refreshRoadRoute(nextOrigin, nextDestination);
+    } else {
+      routeRequestRef.current += 1;
+      setRouteBusy(false);
     }
   };
 
@@ -189,7 +234,7 @@ export function RoutePickerModal({
     }
   };
 
-  const submit = () => {
+  const submit = async () => {
     const cleanTitle = title.trim();
     const cleanSchedule = schedule.trim();
     const durationMinutes = Number(duration);
@@ -201,6 +246,11 @@ export function RoutePickerModal({
       Alert.alert('Check route details', 'Enter a route name, schedule, and duration from 1 to 360 minutes.');
       return;
     }
+    const roadGeometry = routeGeometry ?? await refreshRoadRoute(origin, destination);
+    if (!roadGeometry) {
+      Alert.alert('Road route unavailable', 'Commute Ping needs a road-following route before it can monitor a commute. Check the connection and retry.');
+      return;
+    }
     onSubmit({
       id: `${Date.now()}`,
       title: cleanTitle,
@@ -209,13 +259,7 @@ export function RoutePickerModal({
       learned: false,
       origin,
       destination,
-      geometry: {
-        source: 'preview',
-        coordinates: [
-          { latitude: origin.latitude, longitude: origin.longitude },
-          { latitude: destination.latitude, longitude: destination.longitude },
-        ],
-      },
+      geometry: roadGeometry,
     });
     resetForm();
   };
@@ -298,16 +342,23 @@ export function RoutePickerModal({
             )}
 
             <View style={styles.mapCard}>
-              <RouteMap origin={origin} destination={destination} focusedPoint={focusedPoint} onSelect={selectFromMap} />
+              <RouteMap
+                origin={origin}
+                destination={destination}
+                focusedPoint={focusedPoint}
+                routeCoordinates={routeGeometry?.coordinates ?? []}
+                onSelect={selectFromMap}
+              />
               <View style={styles.mapModeBadge}><View style={[styles.stopDot, { backgroundColor: activeStop === 'origin' ? palette.green : palette.red }]} /><Text style={styles.mapModeText}>Tap map to set {activeStop === 'origin' ? 'start' : 'destination'}</Text></View>
-              {busyLabel && (
+              {(busyLabel || routeBusy) && (
                 <View accessibilityLiveRegion="polite" style={styles.busyOverlay}>
                   <ActivityIndicator color={palette.white} />
-                  <Text style={styles.busyText}>{busyLabel}</Text>
+                  <Text style={styles.busyText}>{busyLabel ?? 'Finding road route'}</Text>
                 </View>
               )}
             </View>
-            <Text style={styles.mapHint}>The highlighted stop is updated by search or a map tap. The blue line is an endpoint preview until road routing is connected.</Text>
+            <Text style={styles.mapHint}>{roadRouteReady ? 'The blue line follows the calculated road route and will appear on the active commute screen.' : 'Choose both places to calculate the road-following route.'}</Text>
+            {routeError && <Text accessibilityLiveRegion="assertive" style={styles.routeError}>{routeError}</Text>}
 
             <View style={styles.formCard}>
               <View style={styles.formHeading}>
@@ -347,16 +398,16 @@ export function RoutePickerModal({
                 <View style={styles.flexOne}>
                   <Text style={styles.summaryTitle}>{title.trim() || 'New planned route'}</Text>
                   <Text numberOfLines={2} style={styles.summaryCopy}>{shortLabel(origin?.label ?? '')} → {shortLabel(destination?.label ?? '')}</Text>
-                  <Text style={styles.summaryMeta}>{schedule || 'Schedule needed'} · {duration ? `${duration} min` : 'Duration needed'}</Text>
+                  <Text style={styles.summaryMeta}>{schedule || 'Schedule needed'} · {duration ? `${duration} min` : 'Duration needed'}{routeGeometry?.distanceMeters ? ` · ${(routeGeometry.distanceMeters / 1_000).toFixed(1)} km` : ''}</Text>
                 </View>
               </View>
             )}
 
-            <Pressable accessibilityRole="button" disabled={!routeReady || Boolean(busyLabel)} onPress={submit} style={[styles.saveButton, (!routeReady || busyLabel) && styles.saveButtonDisabled]}>
+            <Pressable accessibilityRole="button" disabled={!routeReady || Boolean(busyLabel) || routeBusy} onPress={() => { void submit(); }} style={[styles.saveButton, (!routeReady || busyLabel || routeBusy) && styles.saveButtonDisabled]}>
               <AppIcon name={pickerIcons.save} size={17} color={palette.white} />
               <Text style={styles.saveButtonText}>Save Route & Use for Commutes</Text>
             </Pressable>
-            <Text style={styles.privacyCopy}>Searches are handled by the device location service. Saved route points remain on this device in the current build.</Text>
+            <Text style={styles.privacyCopy}>Searches use the device location service. Start and destination coordinates are sent over HTTPS to the configured routing provider to calculate the road path; saved route data stays on this device.</Text>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -461,6 +512,7 @@ const styles = StyleSheet.create({
   busyOverlay: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(11,11,14,0.72)' },
   busyText: { color: palette.text, fontSize: 11, fontWeight: '600' },
   mapHint: { color: palette.mutedDark, fontSize: 10, lineHeight: 15, marginTop: 9, paddingHorizontal: 3 },
+  routeError: { color: '#FF9AA3', fontSize: 10, lineHeight: 15, marginTop: 8, paddingHorizontal: 3 },
   formCard: { marginTop: 20, padding: 16, borderRadius: radius.large, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card },
   formHeading: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, marginBottom: 3 },
   formTitle: { color: palette.text, fontSize: 14, fontWeight: '700' },

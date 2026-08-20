@@ -80,6 +80,7 @@ export type CommuteAction =
   | { type: 'TOGGLE_RULE'; key: AlertRuleKey }
   | { type: 'TOGGLE_SENSOR'; key: SensorKey }
   | { type: 'ADD_ROUTE'; route: SavedRoute }
+  | { type: 'UPDATE_ROUTE_GEOMETRY'; id: string; geometry: RouteGeometry }
   | { type: 'DELETE_ROUTE'; id: string }
   | { type: 'ADD_CONTACT'; contact: TrustedContact }
   | { type: 'DELETE_CONTACT'; id: string }
@@ -180,6 +181,13 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       ));
       return duplicate ? state : { ...state, routes: [...state.routes, action.route] };
     }
+    case 'UPDATE_ROUTE_GEOMETRY':
+      return {
+        ...state,
+        routes: state.routes.map((route) => (
+          route.id === action.id ? { ...route, geometry: action.geometry } : route
+        )),
+      };
     case 'DELETE_ROUTE':
       if (state.activeRouteId === action.id) return state;
       return { ...state, routes: state.routes.filter((route) => route.id !== action.id) };

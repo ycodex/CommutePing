@@ -18,6 +18,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppIcon } from '@/components/app-icon';
 import { palette, radius } from '@/constants/commute-theme';
+import { fetchRoadRoute } from '@/device/road-routing';
+import { prepareBackgroundCommuteTracking, stopBackgroundCommuteTracking } from '@/device/background-commute-location';
 import {
   commuteReducer,
   initialCommuteState,
@@ -34,6 +36,7 @@ import { commuteTimingAt, type CommuteTiming, type IdleMonitorState } from '@/do
 import type { RouteDeviationState } from '@/domain/route-deviation';
 import { phoneDialUrl } from '@/domain/sos-actions';
 import type { CommuteLocation, LocationRuntimeStatus } from '@/hooks/use-commute-location';
+import { ConnectedActionError, useConnectedCommutes } from '@/hooks/use-connected-commutes';
 import { useCommutePreferences } from '@/hooks/use-commute-preferences';
 import { useCommuteLocation } from '@/hooks/use-commute-location';
 import { useBatteryState, useMotionReadings } from '@/hooks/use-device-safety';
@@ -48,6 +51,8 @@ import { contactSetupForResult, type ContactPrefill } from '@/features/contacts/
 import { pickDeviceContact } from '@/features/contacts/device-contact-picker';
 import { RoutePickerModal } from '@/features/routes/route-picker-modal';
 import { SosCameraModal } from '@/features/sos/sos-camera-modal';
+import { ConnectedCirclePanel } from '@/features/connected/connected-circle-panel';
+import { CommuteModeSwitch, MonitoringScreen } from '@/features/connected/monitoring-screen';
 import { ActiveCommuteMap } from './active-commute-map';
 
 const icons = {
@@ -77,6 +82,11 @@ const icons = {
 
 type ToastState = { id: number; message: string } | null;
 type IconName = SymbolViewProps['name'];
+type EmergencyCapture = {
+  id: number;
+  label: string;
+  reason: 'manual' | 'fall' | 'snatch' | 'deviation';
+};
 
 function createLocalIncident({
   kind,
@@ -96,6 +106,20 @@ function createLocalIncident({
     status,
     ...(routeId ? { routeId } : {}),
   };
+}
+
+function confirmSharedLocationPermission(): Promise<boolean> {
+  return new Promise((resolve) => {
+    Alert.alert(
+      'Share while the phone is locked?',
+      'During this commute, background location lets accepted trusted contacts continue seeing journey progress after you leave the app. Android shows an ongoing notification and iOS may show its location indicator. Sharing stops when you tap Stop Commute.',
+      [
+        { text: 'Not Now', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Continue', onPress: () => resolve(true) },
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) },
+    );
+  });
 }
 
 function Card({ children, style }: { children: ReactNode; style?: object }) {
@@ -290,6 +314,9 @@ function TrackScreen({
   onSelectRoute,
   onStart,
   onEnd,
+  onShowMonitoring,
+  sharingCopy,
+  locationModeLabel,
 }: {
   phase: 'idle' | 'starting' | 'active';
   routes: SavedRoute[];
@@ -311,11 +338,16 @@ function TrackScreen({
   onSelectRoute: (routeId: string) => void;
   onStart: () => void;
   onEnd: () => void;
+  onShowMonitoring: () => void;
+  sharingCopy: string;
+  locationModeLabel: string;
 }) {
   const active = phase === 'active';
   return (
     <ScrollView testID="track-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
-      <ScreenTitle title="Commute Ping" subtitle="Foreground commute tracking" />
+      <ScreenTitle title="Commute Ping" subtitle="Route-based safety tracking" />
+      <CommuteModeSwitch mode="traveller" onChange={(mode) => { if (mode === 'monitoring') onShowMonitoring(); }} />
+      <View style={styles.sharingBanner}><View style={styles.sharingBannerDot} /><Text style={styles.sharingBannerText}>{sharingCopy}</Text></View>
       {phase === 'idle' && <RouteSelector routes={routes} selectedRouteId={selectedRouteId} onSelect={onSelectRoute} />}
       {displayedRoute ? (
         <ActiveRouteCard
@@ -367,7 +399,7 @@ function TrackScreen({
         </Card>
         <Card style={styles.metricCard}>
           <View style={styles.metricLabelRow}><AppIcon name={icons.clock} size={13} color={palette.muted} /><Text style={styles.metricLabel}>LOCATION MODE</Text></View>
-          <Text style={styles.metricValue}>{active ? 'Foreground only' : 'Off'}</Text>
+          <Text style={styles.metricValue}>{active ? locationModeLabel : 'Off'}</Text>
         </Card>
       </View>
 
@@ -468,7 +500,7 @@ function AlertsScreen({
 }) {
   return (
     <ScrollView testID="alerts-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
-      <ScreenTitle title="Alerts & History" subtitle="On-device monitoring · remote delivery not connected" />
+      <ScreenTitle title="Alerts & History" subtitle="Local history · connected alerts when configured" />
       <View style={styles.stack}>
         {alertRows.map((row) => (
           <Card key={row.key} style={[styles.ruleCard, !rules[row.key] && styles.ruleDisabled]}>
@@ -478,7 +510,7 @@ function AlertsScreen({
           </Card>
         ))}
       </View>
-      <Text style={styles.sectionDisclaimer}>Battery and idle rules run during an active foreground commute. Connectivity delivery and automated calls still require the backend.</Text>
+      <Text style={styles.sectionDisclaimer}>Battery and idle rules run during an active commute. Accepted contacts can see shared location freshness; automated confirmation calls are not connected yet.</Text>
 
       <View style={styles.historyHeader}>
         <Text style={styles.historyTitle}>RECENT INCIDENTS</Text>
@@ -541,6 +573,7 @@ function SafetyScreen({
   onToggle,
   onAddContact,
   onDeleteContact,
+  connectedPanel,
 }: {
   sensors: typeof initialCommuteState.sensors;
   contacts: TrustedContact[];
@@ -550,10 +583,12 @@ function SafetyScreen({
   onToggle: (key: SensorKey) => void;
   onAddContact: () => void;
   onDeleteContact: (contact: TrustedContact) => void;
+  connectedPanel: ReactNode;
 }) {
   return (
     <ScrollView testID="safety-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
-      <ScreenTitle title="Sensor Preferences" subtitle="On-device readings during active commutes" />
+      <ScreenTitle title="Safety & Trusted Circle" subtitle="Connected contacts and on-device sensor preferences" />
+      {connectedPanel}
       <View style={styles.stack}>
         {sensorRows.map((row) => (
           <Card key={row.key} style={styles.sensorCard}>
@@ -608,7 +643,7 @@ function SafetyScreen({
           ))}
         </View>
       )}
-      <Text style={styles.sectionDisclaimer}>Detection is experimental and runs only during an active foreground commute. A candidate opens a 10-second cancellation screen; it never contacts emergency services by itself.</Text>
+      <Text style={styles.sectionDisclaimer}>Detection is experimental and runs only during an active foreground commute. A candidate opens a 10-second cancellation screen; if it is not cancelled, a visible foreground evidence session begins. It never contacts emergency services by itself.</Text>
     </ScrollView>
   );
 }
@@ -660,10 +695,10 @@ function SosModal({
         <ScrollView contentContainerStyle={styles.sosModalContent} showsVerticalScrollIndicator={false} style={styles.sosModalScroll}>
         <View style={styles.sosShield}><AppIcon name={icons.shield} size={44} color={palette.white} /></View>
         <Text accessibilityRole="header" style={styles.sosTitle}>SOS</Text>
-        <Text style={styles.sosCopy}>Choose an action. Camera and calling start only after you tap them.</Text>
+        <Text style={styles.sosCopy}>Choose an action. Camera and calling require visible confirmation and device permissions.</Text>
         <Pressable accessibilityRole="button" onPress={onOpenCamera} style={styles.sosActionButton}>
           <AppIcon name={icons.camera} size={22} color={palette.white} />
-          <View style={styles.flexOne}><Text style={styles.sosStatusText}>Open Emergency Camera</Text><Text style={styles.sosActionCopy}>Take a photo or record up to 30 seconds</Text></View>
+          <View style={styles.flexOne}><Text style={styles.sosStatusText}>Start Emergency Evidence</Text><Text style={styles.sosActionCopy}>Visible rear photo, then up to 30 seconds of video</Text></View>
         </Pressable>
         <Pressable accessibilityRole="button" onPress={() => onCall('112', 'Emergency 112')} style={styles.sosActionButton}>
           <AppIcon name={icons.call} size={22} color={palette.white} />
@@ -725,8 +760,8 @@ function SafetyCandidateModal({
           <Text style={styles.candidateCopy}>Motion matched the experimental {candidate.kind} pattern. Confirm that you are safe to cancel.</Text>
           <View style={styles.countdownCircle}><Text style={styles.countdownValue}>{remainingSeconds}</Text><Text style={styles.countdownLabel}>SECONDS</Text></View>
           <Pressable accessibilityRole="button" onPress={onSafe} style={styles.safeButton}><Text style={styles.safeButtonText}>I&apos;M SAFE — CANCEL</Text></Pressable>
-          <Pressable accessibilityRole="button" onPress={onEscalate} style={styles.localSosButton}><Text style={styles.localSosText}>Open local SOS now</Text></Pressable>
-          <Text style={styles.candidateDisclaimer}>Countdown opens the local SOS screen only. No call or message is sent.</Text>
+          <Pressable accessibilityRole="button" onPress={onEscalate} style={styles.localSosButton}><Text style={styles.localSosText}>Start foreground evidence now</Text></Pressable>
+          <Text style={styles.candidateDisclaimer}>At zero, a visible photo-and-video evidence session starts after camera and microphone permission. No call or message is sent.</Text>
         </View>
       </View>
     </Modal>
@@ -813,8 +848,11 @@ export function CommutePingApp() {
   const [routeModal, setRouteModal] = useState(false);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [clearIncidentsModal, setClearIncidentsModal] = useState(false);
-  const [sosCameraVisible, setSosCameraVisible] = useState(false);
+  const [emergencyCapture, setEmergencyCapture] = useState<EmergencyCapture | null>(null);
+  const [trackMode, setTrackMode] = useState<'traveller' | 'monitoring'>('traveller');
   const deviationAlertedRouteRef = useRef<string | null>(null);
+  const connected = useConnectedCommutes();
+  const publishConnectedHeartbeat = connected.publishHeartbeat;
   const battery = useBatteryState();
   const commuteLocation = useCommuteLocation();
   const motion = useMotionReadings(state.phase === 'active' && (state.sensors.fall || state.sensors.snatch));
@@ -859,7 +897,14 @@ export function CommutePingApp() {
           routeId: activeRoute.id,
         }),
       });
-      setToast({ id: Date.now(), message: `Possible deviation from ${activeRoute.title} · check the map` });
+      const detectedAt = Date.now();
+      setEmergencyCapture((current) => current ?? {
+        id: detectedAt,
+        label: `Confirmed route deviation · ${activeRoute.title}`,
+        reason: 'deviation',
+      });
+      dispatch({ type: 'OPEN_SOS' });
+      setToast({ id: detectedAt, message: `Possible deviation from ${activeRoute.title} · foreground evidence opened` });
       return;
     }
     if (routeTracking.deviation.status === 'on-route') deviationAlertedRouteRef.current = null;
@@ -919,6 +964,32 @@ export function CommutePingApp() {
   }, [commuteLocation.runtimeStatus, state.phase]);
 
   useEffect(() => {
+    if (state.phase !== 'active' || !commuteLocation.location) return;
+    const movementStatus = idleMonitor.status === 'idle'
+      ? 'idle'
+      : idleMonitor.status === 'stationary'
+        ? 'stationary'
+        : 'moving';
+    const routeStatus = !routeTracking.monitoringAvailable
+      ? 'unavailable'
+      : routeTracking.deviation.status;
+    void publishConnectedHeartbeat({
+      location: commuteLocation.location,
+      batteryPercent: battery.batteryPercent,
+      movementStatus,
+      routeStatus,
+    });
+  }, [
+    battery.batteryPercent,
+    commuteLocation.location,
+    publishConnectedHeartbeat,
+    idleMonitor.status,
+    routeTracking.deviation.status,
+    routeTracking.monitoringAvailable,
+    state.phase,
+  ]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2600);
     return () => clearTimeout(timer);
@@ -931,23 +1002,111 @@ export function CommutePingApp() {
       Alert.alert('Select a planned route', 'Choose a saved route before starting your commute.');
       return;
     }
+    if (connected.configured) {
+      if (connected.status === 'loading') {
+        Alert.alert('Connected circle is loading', 'Wait a moment and try again.');
+        return;
+      }
+      if (!connected.profile) {
+        Alert.alert('Sign in before sharing', 'Open the Circle section in Safety and verify your mobile number before starting a connected commute.');
+        return;
+      }
+      if (connected.activeOwnedCommuteId) {
+        Alert.alert('A shared commute is already active', 'Open Safety & Trusted Circle to mark the earlier commute reached before starting another one.');
+        return;
+      }
+      if (connected.acceptedConnections.length === 0) {
+        Alert.alert('No accepted trusted contacts', 'Invite a trusted contact and wait for them to accept before starting a shared commute.');
+        return;
+      }
+      const approved = await confirmSharedLocationPermission();
+      if (!approved) return;
+    }
     dispatch({ type: 'START_REQUESTED', routeId: selectedRoute.id });
+    let routeForStart = selectedRoute;
+    if (selectedRoute.geometry?.source !== 'road') {
+      if (!selectedRoute.origin || !selectedRoute.destination) {
+        dispatch({ type: 'START_FAILED', status: 'unavailable' });
+        Alert.alert('Route needs an update', 'This saved route does not have map points. Delete it and add it again from the Routes screen.');
+        return;
+      }
+      try {
+        const geometry = await fetchRoadRoute(selectedRoute.origin, selectedRoute.destination);
+        dispatch({ type: 'UPDATE_ROUTE_GEOMETRY', id: selectedRoute.id, geometry });
+        routeForStart = { ...selectedRoute, geometry };
+      } catch {
+        dispatch({ type: 'START_FAILED', status: 'unavailable' });
+        Alert.alert('Road route unavailable', 'Commute Ping could not calculate the road path. Check your internet connection and try again.');
+        return;
+      }
+    }
     const result = await commuteLocation.start(trackingProfile);
     if (!result.ok) {
       dispatch({ type: 'START_FAILED', status: result.reason });
       Alert.alert(
         result.reason === 'denied' ? 'Location permission needed' : 'Location unavailable',
         result.reason === 'denied'
-          ? 'Commute Ping uses foreground location only during an active commute and displays it on this device. Enable permission to start.'
+          ? connected.configured
+            ? 'A shared commute first needs while-in-use location, then separately asks for background access. Enable location permission to continue.'
+            : 'A local commute uses foreground location only while it is active. Enable permission to start.'
           : 'Turn on device location services and try again.',
       );
       return;
     }
-    dispatch({ type: 'START_SUCCEEDED', timestamp: Date.now() });
-    notify(`${selectedRoute.title} started · location stays on this device`);
+    if (connected.configured) {
+      const backgroundResult = await prepareBackgroundCommuteTracking();
+      if (backgroundResult !== 'ready') {
+        commuteLocation.stop();
+        dispatch({ type: 'START_FAILED', status: backgroundResult === 'denied' ? 'denied' : 'unavailable' });
+        Alert.alert(
+          backgroundResult === 'denied' ? 'Background location needed' : 'Background tracking unavailable',
+          backgroundResult === 'denied'
+            ? 'A shared commute needs background location so trusted contacts still receive updates after you lock the phone. Enable it in device settings and try again.'
+            : 'This device could not start protected background commute tracking. No trusted contact was notified.',
+        );
+        return;
+      }
+    }
+    const startedAt = Date.now();
+    if (connected.configured) {
+      try {
+        await connected.startSharedCommute(
+          routeForStart,
+          startedAt + routeForStart.durationMinutes * 60_000,
+        );
+      } catch (error) {
+        await stopBackgroundCommuteTracking();
+        commuteLocation.stop();
+        dispatch({ type: 'START_FAILED', status: 'unavailable' });
+        Alert.alert(
+          'Shared commute did not start',
+          error instanceof ConnectedActionError
+            ? error.message
+            : 'Trusted contacts were not notified. Check the connection and try again.',
+        );
+        return;
+      }
+    }
+    dispatch({ type: 'START_SUCCEEDED', timestamp: startedAt });
+    notify(connected.configured
+      ? `${routeForStart.title} started · trusted contacts can monitor it`
+      : `${routeForStart.title} started locally · connected sharing is not configured`);
   };
 
-  const endCommute = () => {
+  const endCommute = async () => {
+    if (connected.configured) {
+      try {
+        await connected.completeSharedCommute();
+      } catch (error) {
+        Alert.alert(
+          'Keep tracking for now',
+          error instanceof ConnectedActionError
+            ? error.message
+            : 'Trusted contacts could not be notified. Check the connection and retry Stop Commute.',
+        );
+        return;
+      }
+    }
     const endedAt = Date.now();
     commuteLocation.stop();
     dispatch({
@@ -974,7 +1133,7 @@ export function CommutePingApp() {
         id: `${candidate.kind}-${candidate.detectedAt}`,
         kind: candidate.kind,
         title: candidate.kind === 'fall' ? 'Possible fall' : 'Possible phone snatch',
-        detail: `${candidate.accelerationG.toFixed(1)} g acceleration · ${candidate.rotationRadians.toFixed(1)} rad/s rotation. ${safe ? 'Cancelled as safe.' : 'Local SOS screen opened.'}`,
+        detail: `${candidate.accelerationG.toFixed(1)} g acceleration · ${candidate.rotationRadians.toFixed(1)} rad/s rotation. ${safe ? 'Cancelled as safe.' : 'Foreground evidence session opened.'}`,
         status: safe ? 'dismissed' : 'open',
         routeId: activeRoute?.id,
         createdAt: candidate.detectedAt,
@@ -986,7 +1145,12 @@ export function CommutePingApp() {
       return;
     }
     dispatch({ type: 'OPEN_SOS' });
-    notify('Local SOS opened · no call or message was sent');
+    setEmergencyCapture({
+      id: Date.now(),
+      label: candidate.kind === 'fall' ? 'Possible fall detected' : 'Possible phone snatch detected',
+      reason: candidate.kind,
+    });
+    notify('Foreground evidence opened · no call or message was sent');
   };
 
   const openLocalSos = () => {
@@ -996,13 +1160,14 @@ export function CommutePingApp() {
       incident: createLocalIncident({
         kind: 'sos',
         title: 'SOS opened',
-        detail: 'The emergency action screen was opened manually. No call or capture starts without another user action.',
+        detail: 'SOS was opened manually and a visible foreground evidence session was requested. No call or message was sent.',
         status: 'open',
         routeId: activeRoute?.id,
         createdAt: openedAt,
       }),
     });
     dispatch({ type: 'OPEN_SOS' });
+    setEmergencyCapture({ id: openedAt, label: 'Manual SOS', reason: 'manual' });
   };
 
   const addTrustedContact = async () => {
@@ -1118,13 +1283,15 @@ export function CommutePingApp() {
 
   let screen: ReactNode;
   if (state.screen === 'track') {
-    screen = <TrackScreen phase={state.phase} routes={state.routes} selectedRouteId={selectedRoute?.id ?? null} displayedRoute={displayedRoute} routeCoordinates={routeTracking.routeCoordinates} routeMonitoringAvailable={routeTracking.monitoringAvailable} routeDeviation={routeTracking.deviation} timing={timing} idleStatus={idleMonitor.status} currentLocation={commuteLocation.location} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onSelectRoute={setSelectedRouteId} onStart={startCommute} onEnd={endCommute} />;
+    screen = trackMode === 'monitoring'
+      ? <MonitoringScreen connected={connected} onShowTraveller={() => setTrackMode('traveller')} onOpenCircle={() => dispatch({ type: 'NAVIGATE', screen: 'safety' })} />
+      : <TrackScreen phase={state.phase} routes={state.routes} selectedRouteId={selectedRoute?.id ?? null} displayedRoute={displayedRoute} routeCoordinates={routeTracking.routeCoordinates} routeMonitoringAvailable={routeTracking.monitoringAvailable} routeDeviation={routeTracking.deviation} timing={timing} idleStatus={idleMonitor.status} currentLocation={commuteLocation.location} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onSelectRoute={setSelectedRouteId} onStart={startCommute} onEnd={() => { void endCommute(); }} onShowMonitoring={() => setTrackMode('monitoring')} sharingCopy={connected.configured ? connected.profile ? `${connected.acceptedConnections.length} trusted contact${connected.acceptedConnections.length === 1 ? '' : 's'} ready for shared commutes` : 'Sign in from Safety to notify trusted contacts' : 'Local-only mode · connect Supabase to share across phones'} locationModeLabel={connected.configured && connected.activeOwnedCommuteId ? 'Background shared' : 'Foreground local'} />;
   } else if (state.screen === 'routes') {
     screen = <RoutesScreen routes={state.routes} activeRouteId={state.activeRouteId} onAdd={() => setRouteModal(true)} onDelete={deleteRoute} />;
   } else if (state.screen === 'alerts') {
     screen = <AlertsScreen rules={state.rules} incidents={state.incidents} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} onResolveIncident={(id) => dispatch({ type: 'RESOLVE_INCIDENT', id, status: 'recorded' })} onClearIncidents={() => setClearIncidentsModal(true)} />;
   } else {
-    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onDeleteContact={deleteContact} />;
+    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onDeleteContact={deleteContact} connectedPanel={<ConnectedCirclePanel connected={connected} localCommuteActive={state.phase === 'active'} />} />;
   }
 
   return (
@@ -1134,8 +1301,8 @@ export function CommutePingApp() {
         <View style={styles.content}>{screen}</View>
         <BottomNavigation screen={state.screen} onNavigate={(next) => dispatch({ type: 'NAVIGATE', screen: next })} onSos={openLocalSos} />
       </View>
-      <SosModal visible={state.sosActive && !sosCameraVisible} contacts={state.contacts} onOpenCamera={() => setSosCameraVisible(true)} onCall={openPhoneDialer} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS closed'); }} />
-      <SosCameraModal visible={sosCameraVisible} onClose={() => setSosCameraVisible(false)} onEvidenceCaptured={recordSosEvidence} />
+      <SosModal visible={state.sosActive && !emergencyCapture} contacts={state.contacts} onOpenCamera={() => setEmergencyCapture({ id: Date.now(), label: 'Manual SOS evidence', reason: 'manual' })} onCall={openPhoneDialer} onCancel={() => { setEmergencyCapture(null); dispatch({ type: 'CLOSE_SOS' }); notify('SOS closed'); }} />
+      <SosCameraModal key={emergencyCapture?.id ?? 'closed'} visible={Boolean(emergencyCapture)} autoCapture triggerLabel={emergencyCapture?.label} onClose={() => setEmergencyCapture(null)} onEvidenceCaptured={recordSosEvidence} />
       {motionSafety.candidate && <SafetyCandidateModal key={motionSafety.candidate.detectedAt} candidate={motionSafety.candidate} onSafe={() => respondToMotionCandidate(true)} onEscalate={() => respondToMotionCandidate(false)} />}
       <AddContactModal key={contactModalKey} visible={contactModal} initialContact={contactPrefill} accessMessage={contactAccessMessage} onClose={() => setContactModal(false)} onSubmit={saveTrustedContact} />
       <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setSelectedRouteId(route.id); setRouteModal(false); notify(`${route.title} saved locally and selected`); }} />
@@ -1164,6 +1331,9 @@ const styles = StyleSheet.create({
   emptyCard: { padding: 18 },
   routeSetupCard: { padding: 15, marginBottom: 14 },
   routeSelector: { marginBottom: 14 },
+  sharingBanner: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 12, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card, paddingHorizontal: 12, marginBottom: 14 },
+  sharingBannerDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.blue },
+  sharingBannerText: { flex: 1, color: palette.muted, fontSize: 9, lineHeight: 13 },
   routeSelectorLabel: { color: palette.mutedDark, fontSize: 9, fontWeight: '700', letterSpacing: 0.7, marginBottom: 9 },
   routeSelectorContent: { gap: 9, paddingRight: 8 },
   routeChoice: { width: 190, minHeight: 62, borderRadius: radius.medium, borderColor: palette.line, borderWidth: 1, backgroundColor: palette.card, paddingHorizontal: 12, paddingVertical: 10 },

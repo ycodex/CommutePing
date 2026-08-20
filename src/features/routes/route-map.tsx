@@ -1,11 +1,12 @@
 import { Text, View } from 'react-native';
 
-import type { RoutePoint } from '@/domain/commute';
+import type { RouteCoordinate, RoutePoint } from '@/domain/commute';
 
 export type RouteMapProps = {
   origin: RoutePoint | null;
   destination: RoutePoint | null;
   focusedPoint: RoutePoint | null;
+  routeCoordinates: RouteCoordinate[];
   onSelect: (coordinate: Pick<RoutePoint, 'latitude' | 'longitude'>) => void;
 };
 

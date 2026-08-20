@@ -1,49 +1,40 @@
+import {
+  Camera,
+  type CameraRef,
+  GeoJSONSource,
+  Layer,
+  Map,
+  ViewAnnotation,
+} from '@maplibre/maplibre-react-native';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { Platform, StyleSheet, Text, View } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type Region } from 'react-native-maps';
+import { StyleSheet, View } from 'react-native';
 
 import { palette } from '@/constants/commute-theme';
-import { isGoogleMapsConfigured } from '@/device/maps-config';
+import { getMapStyleUrl } from '@/device/open-map-config';
 import type { RouteCoordinate } from '@/domain/commute';
 import type { ActiveCommuteMapProps } from './active-commute-map';
 
-const fallbackRegion: Region = {
-  latitude: 12.9716,
-  longitude: 77.5946,
-  latitudeDelta: 0.15,
-  longitudeDelta: 0.15,
-};
-
-const darkMapStyle = [
-  { elementType: 'geometry', stylers: [{ color: '#1d1d20' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#a4a4ad' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#1d1d20' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#34343a' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#29292e' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#101b29' }] },
-  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#24262a' }] },
-];
-
-function regionFor(point: RouteCoordinate | undefined): Region {
-  if (!point) return fallbackRegion;
-  return { ...point, latitudeDelta: 0.04, longitudeDelta: 0.04 };
-}
+const bengaluruCenter: [number, number] = [77.5946, 12.9716];
 
 export function ActiveCommuteMap({ coordinates, currentLocation }: ActiveCommuteMapProps) {
-  const mapRef = useRef<MapView>(null);
-  const googleMapsConfigured = isGoogleMapsConfigured();
-  const googleMapsReady = Platform.OS !== 'android' || googleMapsConfigured;
+  const cameraRef = useRef<CameraRef>(null);
   const visibleCoordinates = useMemo(
     () => currentLocation ? [...coordinates, currentLocation] : coordinates,
     [coordinates, currentLocation],
   );
+  const routeData = useMemo(() => lineFeature(coordinates), [coordinates]);
   const fitMap = useCallback(() => {
-    if (visibleCoordinates.length < 2) return;
-    mapRef.current?.fitToCoordinates(visibleCoordinates, {
-      animated: true,
-      edgePadding: { top: 54, right: 42, bottom: 62, left: 42 },
-    });
-  }, [visibleCoordinates]);
+    if (visibleCoordinates.length >= 2) {
+      cameraRef.current?.fitBounds(boundsFor(visibleCoordinates), {
+        padding: { top: 62, right: 44, bottom: 72, left: 44 },
+        duration: 360,
+        easing: 'ease',
+      });
+      return;
+    }
+    const point = currentLocation ?? visibleCoordinates[0];
+    if (point) cameraRef.current?.easeTo({ center: [point.longitude, point.latitude], zoom: 14, duration: 280, easing: 'ease' });
+  }, [currentLocation, visibleCoordinates]);
 
   useEffect(() => {
     fitMap();
@@ -51,36 +42,69 @@ export function ActiveCommuteMap({ coordinates, currentLocation }: ActiveCommute
 
   const origin = coordinates[0];
   const destination = coordinates.at(-1);
-  if (!googleMapsReady) {
-    return (
-      <View accessibilityLabel="Google Maps setup required" style={styles.unavailableMap}>
-        <Text style={styles.unavailableTitle}>Google Maps is not configured in this APK</Text>
-        <Text style={styles.unavailableCopy}>Install a build created with the restricted Android Maps key.</Text>
-      </View>
-    );
-  }
-
   return (
-    <MapView
-      accessibilityLabel="Active commute route map"
-      customMapStyle={darkMapStyle}
-      initialRegion={regionFor(origin)}
-      onMapReady={fitMap}
-      provider={googleMapsConfigured ? PROVIDER_GOOGLE : undefined}
-      ref={mapRef}
-      style={{ height: '100%', width: '100%' }}
-      userInterfaceStyle="dark"
+    <Map
+      accessibilityLabel="Active commute route on OpenStreetMap"
+      attribution
+      mapStyle={getMapStyleUrl()}
+      onDidFinishLoadingMap={fitMap}
+      style={styles.map}
     >
-      {coordinates.length >= 2 && <Polyline coordinates={coordinates} lineCap="round" strokeColor={palette.blue} strokeWidth={5} />}
-      {origin && <Marker coordinate={origin} pinColor={palette.green} title="Start" />}
-      {destination && <Marker coordinate={destination} pinColor={palette.red} title="Destination" />}
-      {currentLocation && <Marker coordinate={currentLocation} pinColor={palette.blue} title="Current location" />}
-    </MapView>
+      <Camera ref={cameraRef} initialViewState={{ center: bengaluruCenter, zoom: 11 }} />
+      {routeData && (
+        <GeoJSONSource data={routeData} id="active-route-line-source">
+          <Layer
+            id="active-route-line"
+            type="line"
+            layout={{ 'line-cap': 'round', 'line-join': 'round' }}
+            paint={{ 'line-color': palette.blue, 'line-opacity': 0.95, 'line-width': 6 }}
+          />
+        </GeoJSONSource>
+      )}
+      {origin && <MapDot id="active-origin" point={origin} color={palette.green} size={17} />}
+      {destination && <MapDot id="active-destination" point={destination} color={palette.red} size={17} />}
+      {currentLocation && <MapDot id="active-current-location" point={currentLocation} color={palette.blue} size={21} pulse />}
+    </Map>
+  );
+}
+
+function MapDot({ id, point, color, size, pulse = false }: { id: string; point: RouteCoordinate; color: string; size: number; pulse?: boolean }) {
+  return (
+    <ViewAnnotation id={id} lngLat={[point.longitude, point.latitude]}>
+      <View style={[styles.dotOuter, pulse && styles.dotPulse, { width: size + 8, height: size + 8, borderRadius: (size + 8) / 2, borderColor: color }]}>
+        <View style={[styles.dot, { width: size, height: size, borderRadius: size / 2, backgroundColor: color }]} />
+      </View>
+    </ViewAnnotation>
+  );
+}
+
+function lineFeature(coordinates: RouteCoordinate[]) {
+  if (coordinates.length < 2) return null;
+  return {
+    type: 'Feature' as const,
+    properties: {},
+    geometry: {
+      type: 'LineString' as const,
+      coordinates: coordinates.map((coordinate) => [coordinate.longitude, coordinate.latitude]),
+    },
+  };
+}
+
+function boundsFor(coordinates: RouteCoordinate[]): [number, number, number, number] {
+  return coordinates.reduce<[number, number, number, number]>(
+    (bounds, coordinate) => [
+      Math.min(bounds[0], coordinate.longitude),
+      Math.min(bounds[1], coordinate.latitude),
+      Math.max(bounds[2], coordinate.longitude),
+      Math.max(bounds[3], coordinate.latitude),
+    ],
+    [coordinates[0].longitude, coordinates[0].latitude, coordinates[0].longitude, coordinates[0].latitude],
   );
 }
 
 const styles = StyleSheet.create({
-  unavailableMap: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#111114', paddingHorizontal: 28 },
-  unavailableTitle: { color: palette.text, fontSize: 13, fontWeight: '700', textAlign: 'center' },
-  unavailableCopy: { color: palette.muted, fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 7 },
+  map: { height: '100%', width: '100%' },
+  dotOuter: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, backgroundColor: 'rgba(15,15,18,0.78)' },
+  dotPulse: { borderWidth: 3, backgroundColor: 'rgba(57,115,246,0.16)' },
+  dot: { borderColor: '#F4F6FA', borderWidth: 2 },
 });
