@@ -17,12 +17,11 @@ jobs:
     environment: google_map_api_key
     timeout-minutes: 30
     env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       GOOGLE_MAPS_ANDROID_API_KEY: ${{ secrets.GOOGLE_MAP_API_KEY }}
 
     steps:
       - name: Check required secrets
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         shell: bash
         run: |
           if [[ -z "$GOOGLE_MAPS_ANDROID_API_KEY" ]]; then
@@ -45,19 +44,13 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Set up Expo and EAS
-        uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8
-        with:
-          eas-version: 22.0.0
-          token: ${{ secrets.EXPO_TOKEN }}
-
       - name: Install dependencies
         run: npm ci
 
       - name: Sync Google Maps key to EAS preview
         shell: bash
         run: >-
-          eas env:set
+          npx --yes eas-cli@22.0.0 env:set
           --name GOOGLE_MAPS_ANDROID_API_KEY
           --value "$GOOGLE_MAPS_ANDROID_API_KEY"
           --environment preview
@@ -66,4 +59,9 @@ jobs:
           --non-interactive
 
       - name: Trigger Android preview APK build
-        run: eas build --platform android --profile preview --non-interactive --no-wait
+        run: >-
+          npx --yes eas-cli@22.0.0 build
+          --platform android
+          --profile preview
+          --non-interactive
+          --no-wait
