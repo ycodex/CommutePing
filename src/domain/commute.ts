@@ -80,11 +80,13 @@ export type CommuteAction =
   | { type: 'TOGGLE_RULE'; key: AlertRuleKey }
   | { type: 'TOGGLE_SENSOR'; key: SensorKey }
   | { type: 'ADD_ROUTE'; route: SavedRoute }
+  | { type: 'DELETE_ROUTE'; id: string }
   | { type: 'ADD_CONTACT'; contact: TrustedContact }
+  | { type: 'DELETE_CONTACT'; id: string }
   | { type: 'RECORD_INCIDENT'; incident: IncidentRecord }
   | { type: 'RESOLVE_INCIDENT'; id: string; status: Extract<IncidentStatus, 'dismissed' | 'recorded'> }
   | { type: 'HYDRATE_PREFERENCES'; preferences: CommutePreferences }
-  | { type: 'RESET_PREFERENCES' }
+  | { type: 'CLEAR_INCIDENTS' }
   | { type: 'OPEN_SOS' }
   | { type: 'CLOSE_SOS' };
 
@@ -135,10 +137,11 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       return { ...state, screen: action.screen };
     case 'START_REQUESTED':
       if (state.phase !== 'idle') return state;
+      if (!action.routeId || !state.routes.some((route) => route.id === action.routeId)) return state;
       return {
         ...state,
         phase: 'starting',
-        activeRouteId: state.routes.some((route) => route.id === action.routeId) ? action.routeId ?? null : null,
+        activeRouteId: action.routeId,
         locationStatus: 'requesting',
       };
     case 'START_SUCCEEDED':
@@ -177,10 +180,15 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       ));
       return duplicate ? state : { ...state, routes: [...state.routes, action.route] };
     }
+    case 'DELETE_ROUTE':
+      if (state.activeRouteId === action.id) return state;
+      return { ...state, routes: state.routes.filter((route) => route.id !== action.id) };
     case 'ADD_CONTACT':
       if (state.contacts.length >= 10) return state;
       if (state.contacts.some((contact) => normalizePhone(contact.phone) === normalizePhone(action.contact.phone))) return state;
       return { ...state, contacts: [...state.contacts, action.contact] };
+    case 'DELETE_CONTACT':
+      return { ...state, contacts: state.contacts.filter((contact) => contact.id !== action.id) };
     case 'RECORD_INCIDENT':
       if (state.incidents.some((incident) => incident.id === action.incident.id)) return state;
       return { ...state, incidents: [action.incident, ...state.incidents].slice(0, 100) };
@@ -193,16 +201,8 @@ export function commuteReducer(state: CommuteState, action: CommuteAction): Comm
       };
     case 'HYDRATE_PREFERENCES':
       return { ...state, ...action.preferences };
-    case 'RESET_PREFERENCES':
-      return {
-        ...state,
-        rules: initialCommuteState.rules,
-        sensors: initialCommuteState.sensors,
-        contacts: [],
-        routes: [],
-        incidents: [],
-        activeRouteId: null,
-      };
+    case 'CLEAR_INCIDENTS':
+      return state.incidents.length === 0 ? state : { ...state, incidents: [] };
     case 'OPEN_SOS':
       return { ...state, sosActive: true };
     case 'CLOSE_SOS':

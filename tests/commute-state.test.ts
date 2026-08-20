@@ -19,7 +19,15 @@ test('selects a battery-aware tracking profile', () => {
 });
 
 test('moves through the explicit commute lifecycle', () => {
-  const requesting = commuteReducer(initialCommuteState, { type: 'START_REQUESTED' });
+  const route = {
+    id: 'route-1',
+    title: 'Office to Home',
+    schedule: 'Weekdays · 8:30 PM',
+    durationMinutes: 42,
+    learned: false,
+  };
+  const withRoute = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
+  const requesting = commuteReducer(withRoute, { type: 'START_REQUESTED', routeId: route.id });
   assert.equal(requesting.phase, 'starting');
   assert.equal(requesting.locationStatus, 'requesting');
 
@@ -39,7 +47,15 @@ test('moves through the explicit commute lifecycle', () => {
 });
 
 test('fails safely when location permission is denied', () => {
-  const requesting = commuteReducer(initialCommuteState, { type: 'START_REQUESTED' });
+  const route = {
+    id: 'route-1',
+    title: 'Office to Home',
+    schedule: 'Weekdays · 8:30 PM',
+    durationMinutes: 42,
+    learned: false,
+  };
+  const withRoute = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
+  const requesting = commuteReducer(withRoute, { type: 'START_REQUESTED', routeId: route.id });
   const denied = commuteReducer(requesting, { type: 'START_FAILED', status: 'denied' });
   assert.equal(denied.phase, 'idle');
   assert.equal(denied.locationStatus, 'denied');
@@ -66,8 +82,13 @@ test('keeps the selected route for the active commute and clears it when the com
   assert.equal(ended.activeRouteId, null);
 });
 
-test('does not activate an unknown saved route', () => {
+test('requires a saved route before requesting commute tracking', () => {
+  const withoutRoute = commuteReducer(initialCommuteState, { type: 'START_REQUESTED' });
+  assert.equal(withoutRoute.phase, 'idle');
+  assert.equal(withoutRoute.locationStatus, 'off');
+
   const requesting = commuteReducer(initialCommuteState, { type: 'START_REQUESTED', routeId: 'missing' });
+  assert.equal(requesting.phase, 'idle');
   assert.equal(requesting.activeRouteId, null);
 });
 
@@ -131,6 +152,28 @@ test('deduplicates trusted contacts by phone number', () => {
   assert.equal(duplicate.contacts.length, added.contacts.length);
 });
 
+test('removes only the selected trusted contact', () => {
+  const first = { id: 'meera', name: 'Meera', relation: 'Roommate', phone: '+91 90000 00003', status: 'local' as const };
+  const second = { id: 'anu', name: 'Anu', relation: 'Sister', phone: '+91 90000 00004', status: 'local' as const };
+  const withFirst = commuteReducer(initialCommuteState, { type: 'ADD_CONTACT', contact: first });
+  const withBoth = commuteReducer(withFirst, { type: 'ADD_CONTACT', contact: second });
+
+  const removed = commuteReducer(withBoth, { type: 'DELETE_CONTACT', id: first.id });
+  assert.deepEqual(removed.contacts, [second]);
+});
+
+test('removes a saved route only when it is not active', () => {
+  const route = { id: 'route-1', title: 'Office to Home', schedule: 'Weekdays', durationMinutes: 42, learned: false };
+  const saved = commuteReducer(initialCommuteState, { type: 'ADD_ROUTE', route });
+  const removed = commuteReducer(saved, { type: 'DELETE_ROUTE', id: route.id });
+  assert.deepEqual(removed.routes, []);
+
+  const requesting = commuteReducer(saved, { type: 'START_REQUESTED', routeId: route.id });
+  const active = commuteReducer(requesting, { type: 'START_SUCCEEDED', timestamp: 1_000 });
+  const protectedRoute = commuteReducer(active, { type: 'DELETE_ROUTE', id: route.id });
+  assert.deepEqual(protectedRoute.routes, [route]);
+});
+
 test('toggles alert rules and sensors independently', () => {
   const callsEnabled = commuteReducer(initialCommuteState, { type: 'TOGGLE_RULE', key: 'calls' });
   assert.equal(callsEnabled.rules.calls, true);
@@ -141,14 +184,23 @@ test('toggles alert rules and sensors independently', () => {
   assert.equal(fallDisabled.sensors.snatch, true);
 });
 
-test('clears only locally persisted preferences', () => {
-  const populated = commuteReducer(initialCommuteState, {
+test('clears incident history without deleting contacts, routes, or preferences', () => {
+  const contact = { id: 'meera', name: 'Meera', relation: 'Roommate', phone: '+91 90000 00003', status: 'local' as const };
+  const route = { id: 'route-1', title: 'Office to Home', schedule: 'Weekdays', durationMinutes: 42, learned: false };
+  const withContact = commuteReducer(initialCommuteState, {
     type: 'ADD_CONTACT',
-    contact: { id: 'meera', name: 'Meera', relation: 'Roommate', phone: '+91 90000 00003', status: 'local' },
+    contact,
   });
-  const active = commuteReducer(populated, { type: 'START_SUCCEEDED' });
-  const cleared = commuteReducer(active, { type: 'RESET_PREFERENCES' });
-  assert.equal(cleared.contacts.length, 0);
-  assert.equal(cleared.routes.length, 0);
-  assert.equal(cleared.phase, 'active');
+  const withRoute = commuteReducer(withContact, { type: 'ADD_ROUTE', route });
+  const withRule = commuteReducer(withRoute, { type: 'TOGGLE_RULE', key: 'idle' });
+  const withIncident = commuteReducer(withRule, {
+    type: 'RECORD_INCIDENT',
+    incident: { id: 'incident-1', kind: 'sos', title: 'SOS opened', detail: 'Local SOS.', createdAt: 1_000, status: 'open' },
+  });
+
+  const cleared = commuteReducer(withIncident, { type: 'CLEAR_INCIDENTS' });
+  assert.deepEqual(cleared.incidents, []);
+  assert.deepEqual(cleared.contacts, [contact]);
+  assert.deepEqual(cleared.routes, [route]);
+  assert.equal(cleared.rules.idle, true);
 });

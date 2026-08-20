@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Rea
 import {
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -31,6 +32,7 @@ import {
 } from '@/domain/commute';
 import { commuteTimingAt, type CommuteTiming, type IdleMonitorState } from '@/domain/commute-monitoring';
 import type { RouteDeviationState } from '@/domain/route-deviation';
+import { phoneDialUrl } from '@/domain/sos-actions';
 import type { CommuteLocation, LocationRuntimeStatus } from '@/hooks/use-commute-location';
 import { useCommutePreferences } from '@/hooks/use-commute-preferences';
 import { useCommuteLocation } from '@/hooks/use-commute-location';
@@ -45,6 +47,7 @@ import { useRouteDeviation } from '@/hooks/use-route-deviation';
 import { contactSetupForResult, type ContactPrefill } from '@/features/contacts/contact-import';
 import { pickDeviceContact } from '@/features/contacts/device-contact-picker';
 import { RoutePickerModal } from '@/features/routes/route-picker-modal';
+import { SosCameraModal } from '@/features/sos/sos-camera-modal';
 import { ActiveCommuteMap } from './active-commute-map';
 
 const icons = {
@@ -69,6 +72,7 @@ const icons = {
   lock: { ios: 'lock.fill', android: 'lock', web: 'lock' },
   close: { ios: 'xmark', android: 'close', web: 'close' },
   home: { ios: 'house.fill', android: 'home', web: 'home' },
+  delete: { ios: 'trash.fill', android: 'delete', web: 'delete' },
 } as const;
 
 type ToastState = { id: number; message: string } | null;
@@ -143,41 +147,18 @@ function MetricChart({ type, value }: { type: 'bars' | 'line'; value: number }) 
   );
 }
 
-function SchematicMap({
-  active,
-  locationStatus,
-  accuracy,
-}: {
-  active: boolean;
-  locationStatus: LocationRuntimeStatus;
-  accuracy: number | null;
-}) {
-  const locationReady = locationStatus === 'live';
-  const statusCopy = locationReady
-    ? `Foreground GPS active${accuracy ? ` · ±${Math.round(accuracy)} m` : ''}`
-    : locationStatus === 'requesting'
-      ? 'Requesting foreground location…'
-      : locationStatus === 'denied'
-        ? 'Location permission denied'
-        : locationStatus === 'unavailable'
-          ? 'Location unavailable · no fallback connected'
-          : 'Location off';
-
+function EmptyRouteMap({ currentLocation }: { currentLocation: CommuteLocation | null }) {
   return (
-    <View accessibilityLabel="Commute status illustration" style={styles.map}>
-      {Array.from({ length: 12 }).map((_, index) => <View key={`v-${index}`} style={[styles.mapDot, { left: `${6 + (index % 6) * 18}%`, top: `${12 + Math.floor(index / 6) * 44}%` }]} />)}
-      {active && locationReady && <>
-        <View style={[styles.routeLine, styles.routeLineOne]} />
-        <View style={[styles.routeLine, styles.routeLineTwo]} />
-        <View style={[styles.routeLine, styles.routeLineThree]} />
-        <View style={styles.homePin}><AppIcon name={icons.home} size={13} color={palette.canvas} /></View>
-      </>}
-      {locationReady && <View style={styles.locationPulse}><View style={styles.locationDot} /></View>}
-      <View style={styles.fallbackBadge}>
-        <AppIcon name={locationReady ? icons.track : icons.wifiOff} size={13} color={locationReady ? palette.green : palette.amber} />
-        <Text style={styles.fallbackText}>{statusCopy}</Text>
+    <View accessibilityLabel="Commute route map" style={styles.activeRouteMap}>
+      <ActiveCommuteMap coordinates={[]} currentLocation={currentLocation} />
+      <View style={styles.activeRouteTitleBadge}>
+        <AppIcon name={icons.routes} size={12} color={palette.text} />
+        <Text numberOfLines={1} style={styles.activeRouteTitle}>Select a planned route</Text>
       </View>
-      {active && <View style={styles.etaBadge}><AppIcon name={icons.play} size={12} color={palette.text} /><Text style={styles.etaText}>Commute active</Text></View>}
+      <View style={styles.activeRouteStatusBadge}>
+        <View style={[styles.routeStatusDot, { backgroundColor: palette.amber }]} />
+        <Text numberOfLines={2} style={styles.activeRouteStatus}>Choose a saved route above before starting the commute</Text>
+      </View>
     </View>
   );
 }
@@ -309,7 +290,6 @@ function TrackScreen({
   onSelectRoute,
   onStart,
   onEnd,
-  onCheckIn,
 }: {
   phase: 'idle' | 'starting' | 'active';
   routes: SavedRoute[];
@@ -331,7 +311,6 @@ function TrackScreen({
   onSelectRoute: (routeId: string) => void;
   onStart: () => void;
   onEnd: () => void;
-  onCheckIn: () => void;
 }) {
   const active = phase === 'active';
   return (
@@ -349,23 +328,22 @@ function TrackScreen({
           routeCoordinates={routeCoordinates}
         />
       ) : (
-        <SchematicMap active={active} locationStatus={locationStatus} accuracy={currentLocation?.accuracy ?? null} />
+        <EmptyRouteMap currentLocation={currentLocation} />
       )}
 
       <View style={styles.commuteSegment}>
-        <Pressable accessibilityRole={active ? 'button' : undefined} onPress={active ? onCheckIn : undefined} style={[styles.segmentButton, !active && styles.segmentButtonSelected]}>
-          <Text style={styles.segmentLabel}>{active ? 'Check In' : 'Idle'}</Text>
-        </Pressable>
         <Pressable
           accessibilityRole="button"
-          disabled={phase === 'starting'}
+          accessibilityState={{ disabled: phase === 'starting' || (!active && !displayedRoute) }}
+          disabled={phase === 'starting' || (!active && !displayedRoute)}
           onPress={active ? onEnd : onStart}
-          style={[styles.segmentButton, active && styles.commuteActiveButton]}
+          style={[styles.segmentButton, styles.commutePrimaryButton, active && styles.commuteStopButton, (!active && !displayedRoute) && styles.commuteButtonDisabled]}
         >
-          <AppIcon name={active ? icons.stop : icons.play} size={14} color={active ? palette.white : palette.muted} />
-          <Text style={[styles.segmentLabel, active && styles.segmentActiveLabel]}>{phase === 'starting' ? 'Getting location…' : active ? 'End Commute' : 'Start Commute'}</Text>
+          <AppIcon name={active ? icons.stop : icons.play} size={16} color={palette.white} />
+          <Text style={styles.segmentActiveLabel}>{phase === 'starting' ? 'Getting location…' : active ? 'Stop Commute' : 'Start Commute'}</Text>
         </Pressable>
       </View>
+      {!active && !displayedRoute && <Text style={styles.routeRequiredCopy}>Select a planned route to enable Start Commute.</Text>}
 
       {active && (
         <View style={styles.insightGrid}>
@@ -412,7 +390,17 @@ function formatClockTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => void }) {
+function RoutesScreen({
+  routes,
+  activeRouteId,
+  onAdd,
+  onDelete,
+}: {
+  routes: SavedRoute[];
+  activeRouteId: string | null;
+  onAdd: () => void;
+  onDelete: (route: SavedRoute) => void;
+}) {
   return (
     <ScrollView testID="routes-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
       <ScreenTitle title="Planned Routes" subtitle="Saved locally on this device" />
@@ -433,7 +421,16 @@ function RoutesScreen({ routes, onAdd }: { routes: SavedRoute[]; onAdd: () => vo
               )}
               <Text style={styles.cardCopy}>{route.schedule} · {route.durationMinutes} min · {route.geometry?.source === 'road' ? 'Road path' : 'Endpoint preview'}</Text>
             </View>
-            <AppIcon name={route.learned ? icons.chevron : icons.check} size={17} color={route.learned ? palette.mutedDark : palette.green} />
+            <Pressable
+              accessibilityLabel={`Delete ${route.title}`}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: route.id === activeRouteId }}
+              disabled={route.id === activeRouteId}
+              onPress={() => onDelete(route)}
+              style={[styles.rowDeleteButton, route.id === activeRouteId && styles.rowDeleteButtonDisabled]}
+            >
+              <AppIcon name={icons.delete} size={17} color={route.id === activeRouteId ? palette.mutedDark : '#FF7A84'} />
+            </Pressable>
           </View>
         ))}
       </View>
@@ -461,11 +458,13 @@ function AlertsScreen({
   incidents,
   onToggle,
   onResolveIncident,
+  onClearIncidents,
 }: {
   rules: typeof initialCommuteState.rules;
   incidents: IncidentRecord[];
   onToggle: (key: AlertRuleKey) => void;
   onResolveIncident: (id: string) => void;
+  onClearIncidents: () => void;
 }) {
   return (
     <ScrollView testID="alerts-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
@@ -514,6 +513,12 @@ function AlertsScreen({
           ))}
         </View>
       )}
+      {incidents.length > 0 && (
+        <Pressable accessibilityRole="button" onPress={onClearIncidents} style={styles.clearIncidentsButton}>
+          <AppIcon name={icons.delete} size={15} color="#FF7A84" />
+          <Text style={styles.clearDataText}>Clear Incident History</Text>
+        </Pressable>
+      )}
     </ScrollView>
   );
 }
@@ -535,7 +540,7 @@ function SafetyScreen({
   contactPickerBusy,
   onToggle,
   onAddContact,
-  onClearLocalData,
+  onDeleteContact,
 }: {
   sensors: typeof initialCommuteState.sensors;
   contacts: TrustedContact[];
@@ -544,7 +549,7 @@ function SafetyScreen({
   contactPickerBusy: boolean;
   onToggle: (key: SensorKey) => void;
   onAddContact: () => void;
-  onClearLocalData: () => void;
+  onDeleteContact: (contact: TrustedContact) => void;
 }) {
   return (
     <ScrollView testID="safety-screen" style={styles.scroll} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
@@ -574,13 +579,35 @@ function SafetyScreen({
         onPress={onAddContact}
         style={[styles.contactsCard, contactPickerBusy && styles.contactsCardBusy]}
       >
-        <View style={styles.avatarStack}>{contacts.slice(0, 3).map((contact, index) => <View key={contact.id} style={[styles.avatar, { marginLeft: index === 0 ? 0 : -8 }]}><Text style={styles.avatarText}>{contact.name.slice(0, 1)}</Text></View>)}</View>
-        <View style={styles.flexOne}><Text style={styles.cardTitle}>Trusted Contacts</Text><Text style={styles.cardCopy}>{contactPickerBusy ? 'Opening phone contacts…' : contacts.length === 0 ? 'None saved yet' : `${contacts.length} saved locally · no invite sent`}</Text></View>
+        <View style={styles.dataIcon}><AppIcon name={icons.people} size={19} color="#AFC5FF" /></View>
+        <View style={styles.flexOne}><Text style={styles.cardTitle}>Add Trusted Contact</Text><Text style={styles.cardCopy}>{contactPickerBusy ? 'Opening phone contacts…' : 'Choose from contacts or enter details manually'}</Text></View>
         <AppIcon name={icons.add} size={17} color={palette.muted} />
       </Pressable>
-      <Pressable accessibilityRole="button" onPress={onClearLocalData} style={styles.clearDataButton}>
-        <Text style={styles.clearDataText}>Clear Local Data</Text>
-      </Pressable>
+      <View style={styles.contactsHeader}>
+        <Text style={styles.historyTitle}>SAVED CONTACTS</Text>
+        <Text style={styles.historyCount}>{contacts.length}</Text>
+      </View>
+      {contacts.length === 0 ? (
+        <Card style={styles.emptyCard}>
+          <Text style={styles.cardTitle}>No trusted contacts saved</Text>
+          <Text style={styles.cardCopy}>Add someone you trust. Their details stay visible here and can be removed individually.</Text>
+        </Card>
+      ) : (
+        <View style={styles.stack}>
+          {contacts.map((contact) => (
+            <Card key={contact.id} style={styles.contactListCard}>
+              <View style={styles.avatar}><Text style={styles.avatarText}>{contact.name.slice(0, 1).toUpperCase()}</Text></View>
+              <View style={styles.flexOne}>
+                <Text style={styles.cardTitle}>{contact.name}</Text>
+                <Text style={styles.cardCopy}>{contact.relation} · {contact.phone}</Text>
+              </View>
+              <Pressable accessibilityLabel={`Delete ${contact.name}`} accessibilityRole="button" onPress={() => onDeleteContact(contact)} style={styles.rowDeleteButton}>
+                <AppIcon name={icons.delete} size={17} color="#FF7A84" />
+              </Pressable>
+            </Card>
+          ))}
+        </View>
+      )}
       <Text style={styles.sectionDisclaimer}>Detection is experimental and runs only during an active foreground commute. A candidate opens a 10-second cancellation screen; it never contacts emergency services by itself.</Text>
     </ScrollView>
   );
@@ -596,8 +623,8 @@ function BottomNavigation({ screen, onNavigate, onSos }: { screen: AppScreen; on
   return (
     <View style={styles.bottomNav}>
       {tabs.slice(0, 2).map((tab) => <NavButton key={tab.id} tab={tab} active={screen === tab.id} onPress={() => onNavigate(tab.id)} />)}
-      <Pressable accessibilityLabel="Open SOS demo" accessibilityRole="button" onPress={onSos} style={styles.sosButton}>
-        <View style={styles.sosButtonInner}><AppIcon name={icons.shield} size={24} color={palette.red} /><Text style={styles.sosDemoLabel}>DEMO</Text></View>
+      <Pressable accessibilityLabel="Open SOS" accessibilityRole="button" onPress={onSos} style={styles.sosButton}>
+        <View style={styles.sosButtonInner}><AppIcon name={icons.shield} size={24} color={palette.red} /><Text style={styles.sosDemoLabel}>SOS</Text></View>
       </Pressable>
       {tabs.slice(2).map((tab) => <NavButton key={tab.id} tab={tab} active={screen === tab.id} onPress={() => onNavigate(tab.id)} />)}
     </View>
@@ -613,18 +640,46 @@ function NavButton({ tab, active, onPress }: { tab: { label: string; icon: IconN
   );
 }
 
-function SosModal({ visible, onCancel }: { visible: boolean; onCancel: () => void }) {
+function SosModal({
+  visible,
+  contacts,
+  onCancel,
+  onOpenCamera,
+  onCall,
+}: {
+  visible: boolean;
+  contacts: TrustedContact[];
+  onCancel: () => void;
+  onOpenCamera: () => void;
+  onCall: (phone: string, label: string) => void;
+}) {
   return (
     <Modal visible={visible} animationType="fade" transparent={false} onRequestClose={onCancel}>
       <StatusBar style="light" />
       <SafeAreaView style={styles.sosModal}>
+        <ScrollView contentContainerStyle={styles.sosModalContent} showsVerticalScrollIndicator={false} style={styles.sosModalScroll}>
         <View style={styles.sosShield}><AppIcon name={icons.shield} size={44} color={palette.white} /></View>
-        <Text accessibilityRole="header" style={styles.sosTitle}>SOS DEMO</Text>
-        <Text style={styles.sosCopy}>This screen previews the intended emergency flow.{`\n`}No alert has been sent.</Text>
-        <Card style={styles.sosStatus}><AppIcon name={icons.camera} size={22} color="#FF7782" /><Text style={styles.sosStatusText}>Camera capture · Not connected</Text></Card>
-        <Card style={styles.sosStatus}><AppIcon name={icons.call} size={22} color="#FF7782" /><Text style={styles.sosStatusText}>Calls and messages · Not connected</Text></Card>
-        <Pressable accessibilityLabel="Close SOS demo" accessibilityRole="button" onPress={onCancel} style={styles.cancelSosButton}><Text style={styles.cancelSosText}>CLOSE DEMO</Text></Pressable>
-        <Text style={styles.sosDisclaimer}>No location, image, message, or call leaves this device.</Text>
+        <Text accessibilityRole="header" style={styles.sosTitle}>SOS</Text>
+        <Text style={styles.sosCopy}>Choose an action. Camera and calling start only after you tap them.</Text>
+        <Pressable accessibilityRole="button" onPress={onOpenCamera} style={styles.sosActionButton}>
+          <AppIcon name={icons.camera} size={22} color={palette.white} />
+          <View style={styles.flexOne}><Text style={styles.sosStatusText}>Open Emergency Camera</Text><Text style={styles.sosActionCopy}>Take a photo or record up to 30 seconds</Text></View>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => onCall('112', 'Emergency 112')} style={styles.sosActionButton}>
+          <AppIcon name={icons.call} size={22} color={palette.white} />
+          <View style={styles.flexOne}><Text style={styles.sosStatusText}>Call Emergency 112</Text><Text style={styles.sosActionCopy}>Opens the phone dialer for confirmation</Text></View>
+        </Pressable>
+        {contacts.slice(0, 5).map((contact) => (
+          <Pressable accessibilityRole="button" key={contact.id} onPress={() => onCall(contact.phone, contact.name)} style={styles.sosContactButton}>
+            <View style={styles.avatar}><Text style={styles.avatarText}>{contact.name.slice(0, 1).toUpperCase()}</Text></View>
+            <View style={styles.flexOne}><Text style={styles.sosStatusText}>Call {contact.name}</Text><Text style={styles.sosActionCopy}>{contact.relation} · {contact.phone}</Text></View>
+            <AppIcon name={icons.call} size={18} color="#FF9AA3" />
+          </Pressable>
+        ))}
+        {contacts.length === 0 && <Text style={styles.sosNoContacts}>No trusted contacts saved. Add contacts from the Safety tab.</Text>}
+        <Pressable accessibilityLabel="Close SOS" accessibilityRole="button" onPress={onCancel} style={styles.cancelSosButton}><Text style={styles.cancelSosText}>CLOSE SOS</Text></Pressable>
+        <Text style={styles.sosDisclaimer}>Commute Ping does not guarantee emergency response. Captures stay in temporary app storage and are not uploaded.</Text>
+        </ScrollView>
       </SafeAreaView>
     </Modal>
   );
@@ -729,17 +784,17 @@ function AddContactModal({
   );
 }
 
-function ClearDataModal({ visible, onCancel, onConfirm }: { visible: boolean; onCancel: () => void; onConfirm: () => void }) {
+function ClearIncidentsModal({ visible, onCancel, onConfirm }: { visible: boolean; onCancel: () => void; onConfirm: () => void }) {
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onCancel}>
       <View style={styles.modalBackdropCentered}>
         <View style={styles.confirmModal}>
           <View style={styles.contactModalIcon}><AppIcon name={icons.lock} size={22} color="#FF7A84" /></View>
-          <Text style={styles.contactModalTitle}>Clear local data?</Text>
-          <Text style={styles.contactModalCopy}>This removes saved contacts, routes, incident history, and preferences from this device. It cannot be undone.</Text>
+          <Text style={styles.contactModalTitle}>Clear incident history?</Text>
+          <Text style={styles.contactModalCopy}>This removes only incident history. Trusted contacts, planned routes, and preferences remain saved.</Text>
           <View style={styles.confirmActions}>
             <Pressable accessibilityRole="button" onPress={onCancel} style={styles.confirmCancel}><Text style={styles.confirmCancelText}>Cancel</Text></Pressable>
-            <Pressable accessibilityRole="button" onPress={onConfirm} style={styles.confirmDelete}><Text style={styles.confirmDeleteText}>Clear Data</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={onConfirm} style={styles.confirmDelete}><Text style={styles.confirmDeleteText}>Clear Incidents</Text></Pressable>
           </View>
         </View>
       </View>
@@ -757,7 +812,8 @@ export function CommutePingApp() {
   const [contactPickerBusy, setContactPickerBusy] = useState(false);
   const [routeModal, setRouteModal] = useState(false);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
-  const [clearDataModal, setClearDataModal] = useState(false);
+  const [clearIncidentsModal, setClearIncidentsModal] = useState(false);
+  const [sosCameraVisible, setSosCameraVisible] = useState(false);
   const deviationAlertedRouteRef = useRef<string | null>(null);
   const battery = useBatteryState();
   const commuteLocation = useCommuteLocation();
@@ -767,7 +823,7 @@ export function CommutePingApp() {
   const hydratePreferences = useCallback((stored: typeof preferences) => dispatch({ type: 'HYDRATE_PREFERENCES', preferences: stored }), []);
   const persistedPreferences = useCommutePreferences(preferences, hydratePreferences);
   const selectedRoute = useMemo(
-    () => state.routes.find((route) => route.id === selectedRouteId) ?? state.routes[0] ?? null,
+    () => state.routes.find((route) => route.id === selectedRouteId) ?? null,
     [selectedRouteId, state.routes],
   );
   const activeRoute = useMemo(
@@ -871,7 +927,11 @@ export function CommutePingApp() {
   const notify = (message: string) => setToast({ id: Date.now(), message });
 
   const startCommute = async () => {
-    dispatch({ type: 'START_REQUESTED', routeId: selectedRoute?.id ?? null });
+    if (!selectedRoute) {
+      Alert.alert('Select a planned route', 'Choose a saved route before starting your commute.');
+      return;
+    }
+    dispatch({ type: 'START_REQUESTED', routeId: selectedRoute.id });
     const result = await commuteLocation.start(trackingProfile);
     if (!result.ok) {
       dispatch({ type: 'START_FAILED', status: result.reason });
@@ -884,7 +944,7 @@ export function CommutePingApp() {
       return;
     }
     dispatch({ type: 'START_SUCCEEDED', timestamp: Date.now() });
-    notify(selectedRoute ? `${selectedRoute.title} started · location stays on this device` : 'Commute started · location is visible on this device only');
+    notify(`${selectedRoute.title} started · location stays on this device`);
   };
 
   const endCommute = () => {
@@ -903,23 +963,6 @@ export function CommutePingApp() {
     });
     dispatch({ type: 'END_COMMUTE', timestamp: endedAt });
     notify('Local safe arrival recorded · foreground location stopped');
-  };
-
-  const checkIn = () => {
-    const checkedInAt = Date.now();
-    dispatch({ type: 'CHECK_IN', timestamp: checkedInAt });
-    dispatch({
-      type: 'RECORD_INCIDENT',
-      incident: createLocalIncident({
-        kind: 'check-in',
-        title: 'Manual check-in',
-        detail: activeRoute ? `Checked in during ${activeRoute.title}.` : 'Checked in during an active commute.',
-        status: 'recorded',
-        routeId: activeRoute?.id,
-        createdAt: checkedInAt,
-      }),
-    });
-    notify('Local check-in recorded · nothing was sent');
   };
 
   const respondToMotionCandidate = (safe: boolean) => {
@@ -952,8 +995,8 @@ export function CommutePingApp() {
       type: 'RECORD_INCIDENT',
       incident: createLocalIncident({
         kind: 'sos',
-        title: 'Local SOS opened',
-        detail: 'The emergency preview was opened manually. No external alert was sent.',
+        title: 'SOS opened',
+        detail: 'The emergency action screen was opened manually. No call or capture starts without another user action.',
         status: 'open',
         routeId: activeRoute?.id,
         createdAt: openedAt,
@@ -977,15 +1020,111 @@ export function CommutePingApp() {
     }
   };
 
+  const deleteContact = (contact: TrustedContact) => {
+    Alert.alert(
+      'Delete trusted contact?',
+      `${contact.name} will be removed from this device.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            dispatch({ type: 'DELETE_CONTACT', id: contact.id });
+            notify(`${contact.name} removed`);
+          },
+        },
+      ],
+    );
+  };
+
+  const saveTrustedContact = (contact: TrustedContact) => {
+    if (state.contacts.length >= 10) {
+      Alert.alert('Contact limit reached', 'Remove a trusted contact before adding another.');
+      return;
+    }
+    const phoneDigits = contact.phone.replace(/\D/g, '');
+    if (state.contacts.some((saved) => saved.phone.replace(/\D/g, '') === phoneDigits)) {
+      Alert.alert('Contact already saved', 'That phone number is already in your trusted contacts.');
+      return;
+    }
+    dispatch({ type: 'ADD_CONTACT', contact });
+    setContactModal(false);
+    notify(`${contact.name} saved locally · no invite sent`);
+  };
+
+  const deleteRoute = (route: SavedRoute) => {
+    if (route.id === state.activeRouteId) {
+      Alert.alert('Commute is active', 'Stop the commute before deleting its route.');
+      return;
+    }
+    Alert.alert(
+      'Delete planned route?',
+      `${route.title} will be removed from this device.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            dispatch({ type: 'DELETE_ROUTE', id: route.id });
+            if (selectedRouteId === route.id) setSelectedRouteId(null);
+            notify(`${route.title} removed`);
+          },
+        },
+      ],
+    );
+  };
+
+  const openPhoneDialer = (phone: string, label: string) => {
+    const url = phoneDialUrl(phone);
+    if (!url) {
+      Alert.alert('Invalid phone number', `Update the saved number for ${label} and try again.`);
+      return;
+    }
+    if (Platform.OS === 'web') {
+      Alert.alert('Open the mobile app', 'Calling is available from the installed Android or iOS app.');
+      return;
+    }
+    void Linking.openURL(url).then(() => {
+      dispatch({
+        type: 'RECORD_INCIDENT',
+        incident: createLocalIncident({
+          kind: 'sos',
+          title: `Dialer opened for ${label}`,
+          detail: 'The system phone dialer was opened by the user. Commute Ping does not know whether the call connected.',
+          status: 'recorded',
+          routeId: activeRoute?.id,
+        }),
+      });
+    }).catch(() => {
+      Alert.alert('Could not open phone dialer', 'Check that this device supports phone calls and try again.');
+    });
+  };
+
+  const recordSosEvidence = (kind: 'photo' | 'video') => {
+    dispatch({
+      type: 'RECORD_INCIDENT',
+      incident: createLocalIncident({
+        kind: 'sos',
+        title: `SOS ${kind} captured`,
+        detail: `A ${kind} was captured to temporary app storage. It was not uploaded or sent automatically.`,
+        status: 'recorded',
+        routeId: activeRoute?.id,
+      }),
+    });
+    notify(`${kind === 'photo' ? 'Photo' : 'Video'} captured temporarily on this device`);
+  };
+
   let screen: ReactNode;
   if (state.screen === 'track') {
-    screen = <TrackScreen phase={state.phase} routes={state.routes} selectedRouteId={selectedRoute?.id ?? null} displayedRoute={displayedRoute} routeCoordinates={routeTracking.routeCoordinates} routeMonitoringAvailable={routeTracking.monitoringAvailable} routeDeviation={routeTracking.deviation} timing={timing} idleStatus={idleMonitor.status} currentLocation={commuteLocation.location} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onSelectRoute={setSelectedRouteId} onStart={startCommute} onEnd={endCommute} onCheckIn={checkIn} />;
+    screen = <TrackScreen phase={state.phase} routes={state.routes} selectedRouteId={selectedRoute?.id ?? null} displayedRoute={displayedRoute} routeCoordinates={routeTracking.routeCoordinates} routeMonitoringAvailable={routeTracking.monitoringAvailable} routeDeviation={routeTracking.deviation} timing={timing} idleStatus={idleMonitor.status} currentLocation={commuteLocation.location} batteryPercent={battery.batteryPercent} lowPowerMode={state.lowPowerMode} profileLabel={trackingProfile.label} locationStatus={commuteLocation.runtimeStatus} acceleration={motion.acceleration} rotation={motion.rotation} motionAvailable={motion.available} onSelectRoute={setSelectedRouteId} onStart={startCommute} onEnd={endCommute} />;
   } else if (state.screen === 'routes') {
-    screen = <RoutesScreen routes={state.routes} onAdd={() => setRouteModal(true)} />;
+    screen = <RoutesScreen routes={state.routes} activeRouteId={state.activeRouteId} onAdd={() => setRouteModal(true)} onDelete={deleteRoute} />;
   } else if (state.screen === 'alerts') {
-    screen = <AlertsScreen rules={state.rules} incidents={state.incidents} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} onResolveIncident={(id) => dispatch({ type: 'RESOLVE_INCIDENT', id, status: 'recorded' })} />;
+    screen = <AlertsScreen rules={state.rules} incidents={state.incidents} onToggle={(key) => dispatch({ type: 'TOGGLE_RULE', key })} onResolveIncident={(id) => dispatch({ type: 'RESOLVE_INCIDENT', id, status: 'recorded' })} onClearIncidents={() => setClearIncidentsModal(true)} />;
   } else {
-    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onClearLocalData={() => setClearDataModal(true)} />;
+    screen = <SafetyScreen sensors={state.sensors} contacts={state.contacts} motionAvailable={motion.available} commuteActive={state.phase === 'active'} contactPickerBusy={contactPickerBusy} onToggle={(key) => dispatch({ type: 'TOGGLE_SENSOR', key })} onAddContact={addTrustedContact} onDeleteContact={deleteContact} />;
   }
 
   return (
@@ -995,11 +1134,12 @@ export function CommutePingApp() {
         <View style={styles.content}>{screen}</View>
         <BottomNavigation screen={state.screen} onNavigate={(next) => dispatch({ type: 'NAVIGATE', screen: next })} onSos={openLocalSos} />
       </View>
-      <SosModal visible={state.sosActive} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS demo closed · no data was sent'); }} />
+      <SosModal visible={state.sosActive && !sosCameraVisible} contacts={state.contacts} onOpenCamera={() => setSosCameraVisible(true)} onCall={openPhoneDialer} onCancel={() => { dispatch({ type: 'CLOSE_SOS' }); notify('SOS closed'); }} />
+      <SosCameraModal visible={sosCameraVisible} onClose={() => setSosCameraVisible(false)} onEvidenceCaptured={recordSosEvidence} />
       {motionSafety.candidate && <SafetyCandidateModal key={motionSafety.candidate.detectedAt} candidate={motionSafety.candidate} onSafe={() => respondToMotionCandidate(true)} onEscalate={() => respondToMotionCandidate(false)} />}
-      <AddContactModal key={contactModalKey} visible={contactModal} initialContact={contactPrefill} accessMessage={contactAccessMessage} onClose={() => setContactModal(false)} onSubmit={(contact) => { dispatch({ type: 'ADD_CONTACT', contact }); setContactModal(false); notify(`${contact.name} saved locally · no invite sent`); }} />
+      <AddContactModal key={contactModalKey} visible={contactModal} initialContact={contactPrefill} accessMessage={contactAccessMessage} onClose={() => setContactModal(false)} onSubmit={saveTrustedContact} />
       <RoutePickerModal visible={routeModal} onClose={() => setRouteModal(false)} onSubmit={(route) => { dispatch({ type: 'ADD_ROUTE', route }); setSelectedRouteId(route.id); setRouteModal(false); notify(`${route.title} saved locally and selected`); }} />
-      <ClearDataModal visible={clearDataModal} onCancel={() => setClearDataModal(false)} onConfirm={() => { dispatch({ type: 'RESET_PREFERENCES' }); setSelectedRouteId(null); setClearDataModal(false); notify('Local contacts, routes, incidents, and preferences cleared'); }} />
+      <ClearIncidentsModal visible={clearIncidentsModal} onCancel={() => setClearIncidentsModal(false)} onConfirm={() => { dispatch({ type: 'CLEAR_INCIDENTS' }); setClearIncidentsModal(false); notify('Incident history cleared · contacts and routes kept'); }} />
       {persistedPreferences.storageError && <View accessibilityLiveRegion="polite" style={styles.storageWarning}><Text style={styles.storageWarningText}>Local changes could not be saved. Keep the app open and try again.</Text></View>}
       {toast && <View key={toast.id} accessibilityLiveRegion="polite" style={styles.toast}><AppIcon name={icons.check} size={15} color={palette.green} /><Text style={styles.toastText}>{toast.message}</Text></View>}
     </SafeAreaView>
@@ -1055,8 +1195,12 @@ const styles = StyleSheet.create({
   segmentButton: { minHeight: 47, flex: 1, borderRadius: 16, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
   segmentButtonSelected: { backgroundColor: '#29292D' },
   commuteActiveButton: { backgroundColor: palette.blue },
+  commutePrimaryButton: { backgroundColor: palette.blue },
+  commuteStopButton: { backgroundColor: palette.red },
+  commuteButtonDisabled: { opacity: 0.42 },
   segmentLabel: { color: '#C1C1C7', fontSize: 13, fontWeight: '500' },
-  segmentActiveLabel: { color: palette.white, fontWeight: '600' },
+  segmentActiveLabel: { color: palette.white, fontSize: 13, fontWeight: '700' },
+  routeRequiredCopy: { color: palette.amber, fontSize: 10, textAlign: 'center', marginTop: 9 },
   insightGrid: { marginTop: 14, flexDirection: 'row', gap: 13 },
   insightCard: { flex: 1, minHeight: 96, padding: 14 },
   insightValue: { color: palette.text, fontSize: 15, fontWeight: '700', marginTop: 10 },
@@ -1081,6 +1225,8 @@ const styles = StyleSheet.create({
   privacyCaption: { color: palette.mutedDark, fontSize: 10, textAlign: 'center', marginTop: 18 },
   routeCard: { minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: palette.card, borderColor: palette.line, borderRadius: radius.medium, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 15, paddingVertical: 13 },
   routeIcon: { width: 39, height: 39, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.blueSoft },
+  rowDeleteButton: { width: 38, height: 38, borderRadius: 11, alignItems: 'center', justifyContent: 'center', borderColor: 'rgba(239,57,75,0.24)', borderWidth: 1, backgroundColor: 'rgba(239,57,75,0.07)' },
+  rowDeleteButtonDisabled: { opacity: 0.35 },
   routePlaces: { color: '#AFC5FF', fontSize: 10, lineHeight: 14, marginTop: 5 },
   saveRouteButton: { marginTop: 18, minHeight: 55, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.lineStrong, borderRadius: radius.medium, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   saveRouteButtonDone: { borderColor: 'rgba(69,201,148,0.35)', backgroundColor: palette.greenSoft },
@@ -1103,6 +1249,7 @@ const styles = StyleSheet.create({
   incidentTime: { color: palette.mutedDark, fontSize: 9, marginTop: 7 },
   reviewButton: { alignSelf: 'flex-start', minHeight: 30, borderRadius: 9, borderColor: palette.lineStrong, borderWidth: 1, justifyContent: 'center', paddingHorizontal: 10, marginTop: 9 },
   reviewButtonText: { color: '#C7C7CF', fontSize: 9, fontWeight: '600' },
+  clearIncidentsButton: { minHeight: 45, borderRadius: radius.medium, borderColor: 'rgba(239,57,75,0.35)', borderWidth: 1, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7, marginTop: 16 },
   toggle: { width: 50, height: 29, borderRadius: radius.pill, padding: 3, backgroundColor: '#4C4C53' },
   toggleOn: { backgroundColor: palette.blue },
   toggleThumb: { width: 23, height: 23, borderRadius: 12, backgroundColor: palette.white },
@@ -1117,6 +1264,8 @@ const styles = StyleSheet.create({
   dataIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#29292D', alignItems: 'center', justifyContent: 'center' },
   contactsCard: { marginTop: 14, minHeight: 68, borderRadius: radius.medium, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.lineStrong, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 11 },
   contactsCardBusy: { opacity: 0.58 },
+  contactsHeader: { marginTop: 26, marginBottom: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  contactListCard: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 11, padding: 13 },
   clearDataButton: { minHeight: 45, borderRadius: radius.medium, borderColor: 'rgba(239,57,75,0.35)', borderWidth: 1, alignItems: 'center', justifyContent: 'center', marginTop: 14 },
   clearDataText: { color: '#FF7A84', fontSize: 11, fontWeight: '600' },
   avatarStack: { flexDirection: 'row' },
@@ -1129,12 +1278,18 @@ const styles = StyleSheet.create({
   sosButton: { width: 70, height: 70, marginTop: -34, borderRadius: 35, backgroundColor: '#25252A', borderColor: '#4B4B53', borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   sosButtonInner: { width: 49, height: 49, borderRadius: 25, borderColor: 'rgba(239,57,75,0.35)', borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   sosDemoLabel: { color: '#FF7682', fontSize: 7, fontWeight: '700', letterSpacing: 0.7, marginTop: -2 },
-  sosModal: { flex: 1, backgroundColor: '#4A0B10', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
+  sosModal: { flex: 1, backgroundColor: '#4A0B10' },
+  sosModalScroll: { flex: 1 },
+  sosModalContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, paddingVertical: 30 },
   sosShield: { width: 96, height: 96, borderRadius: 48, backgroundColor: palette.red, alignItems: 'center', justifyContent: 'center' },
   sosTitle: { color: palette.white, fontSize: 30, fontWeight: '700', letterSpacing: -0.8, marginTop: 31 },
   sosCopy: { color: '#F0D4D7', fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 13, marginBottom: 24 },
   sosStatus: { width: '100%', minHeight: 57, marginBottom: 11, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: 'rgba(102,17,24,0.74)', borderColor: 'rgba(240,77,87,0.55)' },
   sosStatusText: { color: palette.white, fontSize: 13, fontWeight: '600' },
+  sosActionButton: { width: '100%', maxWidth: 410, minHeight: 66, marginBottom: 11, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', gap: 13, borderRadius: radius.medium, backgroundColor: 'rgba(102,17,24,0.74)', borderColor: 'rgba(240,77,87,0.55)', borderWidth: 1 },
+  sosContactButton: { width: '100%', maxWidth: 410, minHeight: 58, marginBottom: 9, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 11, borderRadius: radius.medium, backgroundColor: 'rgba(78,14,20,0.64)', borderColor: 'rgba(240,77,87,0.32)', borderWidth: 1 },
+  sosActionCopy: { color: '#DFAEB3', fontSize: 9, lineHeight: 13, marginTop: 4 },
+  sosNoContacts: { color: '#E2B9BD', fontSize: 10, lineHeight: 15, textAlign: 'center', marginVertical: 7 },
   cancelSosButton: { width: '90%', minHeight: 52, borderRadius: radius.pill, borderColor: '#55555C', borderWidth: 1, backgroundColor: '#17171A', alignItems: 'center', justifyContent: 'center', marginTop: 14 },
   cancelSosText: { color: palette.white, fontSize: 12, fontWeight: '700' },
   sosDisclaimer: { color: '#A86167', fontSize: 9, textAlign: 'center', marginTop: 16 },

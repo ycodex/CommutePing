@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import MapView, { Marker, Polyline, type Region } from 'react-native-maps';
+import { Platform, StyleSheet, Text, View } from 'react-native';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type Region } from 'react-native-maps';
 
 import { palette } from '@/constants/commute-theme';
+import { isGoogleMapsConfigured } from '@/device/maps-config';
 import type { RouteCoordinate } from '@/domain/commute';
 import type { ActiveCommuteMapProps } from './active-commute-map';
 
@@ -29,6 +31,8 @@ function regionFor(point: RouteCoordinate | undefined): Region {
 
 export function ActiveCommuteMap({ coordinates, currentLocation }: ActiveCommuteMapProps) {
   const mapRef = useRef<MapView>(null);
+  const googleMapsConfigured = isGoogleMapsConfigured();
+  const googleMapsReady = Platform.OS !== 'android' || googleMapsConfigured;
   const visibleCoordinates = useMemo(
     () => currentLocation ? [...coordinates, currentLocation] : coordinates,
     [coordinates, currentLocation],
@@ -47,12 +51,22 @@ export function ActiveCommuteMap({ coordinates, currentLocation }: ActiveCommute
 
   const origin = coordinates[0];
   const destination = coordinates.at(-1);
+  if (!googleMapsReady) {
+    return (
+      <View accessibilityLabel="Google Maps setup required" style={styles.unavailableMap}>
+        <Text style={styles.unavailableTitle}>Google Maps is not configured in this APK</Text>
+        <Text style={styles.unavailableCopy}>Install a build created with the restricted Android Maps key.</Text>
+      </View>
+    );
+  }
+
   return (
     <MapView
       accessibilityLabel="Active commute route map"
       customMapStyle={darkMapStyle}
       initialRegion={regionFor(origin)}
       onMapReady={fitMap}
+      provider={googleMapsConfigured ? PROVIDER_GOOGLE : undefined}
       ref={mapRef}
       style={{ height: '100%', width: '100%' }}
       userInterfaceStyle="dark"
@@ -64,3 +78,9 @@ export function ActiveCommuteMap({ coordinates, currentLocation }: ActiveCommute
     </MapView>
   );
 }
+
+const styles = StyleSheet.create({
+  unavailableMap: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#111114', paddingHorizontal: 28 },
+  unavailableTitle: { color: palette.text, fontSize: 13, fontWeight: '700', textAlign: 'center' },
+  unavailableCopy: { color: palette.muted, fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 7 },
+});
