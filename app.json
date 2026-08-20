@@ -2,7 +2,7 @@
   "expo": {
     "name": "Commute Ping",
     "slug": "commute-ping",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "commuteping",
@@ -13,11 +13,14 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Commute Ping uses foreground location during an active commute to show progress on this device. This build does not send location to contacts.",
-        "NSMotionUsageDescription": "Commute Ping reads motion sensors during an active commute to preview future fall and phone-snatch detection. This build does not trigger alerts."
+        "NSMotionUsageDescription": "Commute Ping reads motion sensors during an active commute to detect possible falls or phone snatches on this device. It never places calls automatically."
       }
     },
     "android": {
       "package": "in.commuteping.app",
+      "blockedPermissions": [
+        "android.permission.WRITE_CONTACTS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -43,9 +46,24 @@
         }
       ],
       [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow Commute Ping to access your contacts so you can choose a trusted contact. Selected details stay on this device and no invitation is sent."
+        }
+      ],
+      [
         "expo-sensors",
         {
-          "motionPermission": "Commute Ping reads motion sensors during an active commute to preview future fall and phone-snatch detection. This build does not trigger alerts."
+          "motionPermission": "Commute Ping reads motion sensors during an active commute to detect possible falls or phone snatches on this device. It never places calls automatically."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Commute Ping uses the camera only when you open SOS capture to record evidence on this device.",
+          "microphonePermission": "Commute Ping uses the microphone only when you start SOS video recording.",
+          "recordAudioAndroid": true,
+          "barcodeScannerEnabled": false
         }
       ],
       [
@@ -60,7 +78,21 @@
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": true,
+      "baseUrl": "/CommutePing"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "2f289b8c-8a8b-4961-ab3f-cee2badd1ad0"
+      }
+    },
+    "owner": "ycodex",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/2f289b8c-8a8b-4961-ab3f-cee2badd1ad0"
     }
   }
 }
