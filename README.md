@@ -64,7 +64,7 @@ npx eas-cli@latest update --channel preview --environment preview --message "Des
 npx eas-cli@latest build --profile preview --platform android
 ```
 
-The manual **Build Android preview APK** GitHub Actions workflow maps the repository secret `GOOGLE_MAP_API_KEY` to the app's build-time `GOOGLE_MAPS_ANDROID_API_KEY`, stores it as a sensitive EAS preview variable, and triggers an APK build. The workflow also requires an `EXPO_TOKEN` repository secret with access to the `@ycodex/commute-ping` project. Neither value is committed or printed.
+The manual **Build Android preview APK** GitHub Actions workflow runs in the `google_map_api_key` GitHub environment. It maps that environment's `GOOGLE_MAP_API_KEY` secret to the app's build-time `GOOGLE_MAPS_ANDROID_API_KEY`, stores it as a sensitive EAS preview variable, and triggers an APK build. The workflow also requires an `EXPO_TOKEN` repository or environment secret with access to the `@ycodex/commute-ping` project. Neither value is committed or printed.
 
 EAS Update requires a compatible preview or production build on the phone. It is not a replacement for the local Expo Go development server.
 
